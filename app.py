@@ -47,17 +47,46 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     """
     limit = max(1, min(sql_limit, DEFAULT_SQL_LIMIT))
 
-    sql_query_template = """
-       SELECT DISTINCT ON (S.submission, RA."partId")
-            S.submission, S.answer, S.grade, RA."gradeParams"::json as grade_params, RA."partId"
-        FROM "Submission" S
-            INNER JOIN public."ResponseArea" RA ON S."responseAreaId" = RA.id
-            INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
-        WHERE 
-            EF.name = :name_param AND 
-            RA."gradeParams"::jsonb = (:params_param)::jsonb
-        LIMIT :limit_param;
-    """
+    # Start with mandatory filters
+    where_clauses = ["EF.name = :name_param"]
+    params = {
+        "name_param": eval_function_name,
+        "limit_param": limit
+    }
+
+    # Conditionally add the gradeParams filter
+    if grade_params_json:
+        where_clauses.append("RA.\"gradeParams\"::jsonb = (:params_param)::jsonb")
+        params["params_param"] = grade_params_json
+
+    # Combine clauses with AND
+    where_sql = " AND ".join(where_clauses)
+
+    # Start with mandatory filters
+    where_clauses = ["EF.name = :name_param"]
+    params = {
+        "name_param": eval_function_name,
+        "limit_param": limit
+    }
+
+    # Conditionally add the gradeParams filter
+    if grade_params_json:
+        where_clauses.append("RA.\"gradeParams\"::jsonb = (:params_param)::jsonb")
+        params["params_param"] = grade_params_json
+
+    # Combine clauses with AND
+    where_sql = " AND ".join(where_clauses)
+
+    sql_query_template = f"""
+            SELECT
+               S.submission, S.answer, S.grade, RA."gradeParams"::json as grade_params
+            FROM "Submission" S
+                INNER JOIN public."ResponseArea" RA ON S."responseAreaId" = RA.id
+                INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
+            WHERE 
+                {where_sql}
+            LIMIT :limit_param;
+        """
 
     data_records = []
     try:
@@ -228,11 +257,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         eval_function_name = payload.get('eval_function_name')
         grade_params_json = payload.get('grade_params_json')
 
-        if not endpoint_to_test or not eval_function_name or not grade_params_json:
+        if not endpoint_to_test or not eval_function_name:
             missing_fields = []
             if not endpoint_to_test: missing_fields.append("'endpoint'")
             if not eval_function_name: missing_fields.append("'eval_function_name'")
-            if not grade_params_json: missing_fields.append("'grade_params_json'")
             raise ValueError(f"Missing required input fields: {', '.join(missing_fields)}")
 
         conn = get_db_connection()
