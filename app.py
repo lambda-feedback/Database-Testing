@@ -1,7 +1,14 @@
 import os
 import json
 import logging
+import csv
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 import requests
@@ -46,21 +53,6 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     Uses parameterized query execution for security.
     """
     limit = max(1, min(sql_limit, DEFAULT_SQL_LIMIT))
-
-    # Start with mandatory filters
-    where_clauses = ["EF.name = :name_param"]
-    params = {
-        "name_param": eval_function_name,
-        "limit_param": limit
-    }
-
-    # Conditionally add the gradeParams filter
-    if grade_params_json:
-        where_clauses.append("RA.\"gradeParams\"::jsonb = (:params_param)::jsonb")
-        params["params_param"] = grade_params_json
-
-    # Combine clauses with AND
-    where_sql = " AND ".join(where_clauses)
 
     # Start with mandatory filters
     where_clauses = ["EF.name = :name_param"]
@@ -138,7 +130,6 @@ def _execute_request(endpoint_path: str, payload: Dict[str, Any]) -> Tuple[
             json=payload,
             timeout=10,
         )
-
 
         if response.status_code != 200:
             return None, {
@@ -242,6 +233,114 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dic
     }
 
 
+def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional[str]:
+    """Write error list to CSV file."""
+    if not errors:
+        logger.info("No errors to write to CSV.")
+        return None
+
+    try:
+        filepath = f"/tmp/{filename}"
+
+        # Get all unique keys from all error dictionaries
+        fieldnames = set()
+        for error in errors:
+            fieldnames.update(error.keys())
+        fieldnames = sorted(list(fieldnames))
+
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(errors)
+
+        logger.info(f"CSV file created: {filepath}")
+        return filepath
+
+    except Exception as e:
+        logger.error(f"Failed to create CSV: {e}")
+        return None
+
+
+def send_email_with_results(results: Dict[str, Any], csv_path: Optional[str],
+                            endpoint: str, eval_function_name: str, recipient_email: str):
+    """Send email with test results and CSV attachment."""
+
+    # Get email config from environment variables
+    sender_email = os.environ.get('SENDER_EMAIL')
+    sender_password = os.environ.get('SENDER_PASSWORD')
+
+    if not all([sender_email, sender_password, recipient_email]):
+        logger.warning("Email credentials not configured. Skipping email notification.")
+        return
+
+    try:
+        # Calculate pass rate
+        pass_count = results['pass_count']
+        total_count = results['total_count']
+        pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
+
+        # Determine status
+        status = "✓ PASSED" if results['number_of_errors'] == 0 else "✗ FAILED"
+
+        # Create email
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = recipient_email
+        msg['Subject'] = f"Endpoint Test Results - {status} - {eval_function_name}"
+
+        # Email body
+        body = f"""
+Evaluation Function Testing Report
+=======================
+
+Test Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Endpoint: {endpoint}
+Evaluation Function: {eval_function_name}
+
+Results Summary:
+----------------
+Status: {status}
+Pass Rate: {pass_rate:.1f}% ({pass_count}/{total_count})
+Total Tests: {total_count}
+Passed: {pass_count}
+Failed: {results['number_of_errors']}
+
+{f"⚠ Warning: Testing stopped early after reaching {MAX_ERROR_THRESHOLD} errors." if results['number_of_errors'] >= MAX_ERROR_THRESHOLD else ""}
+
+{'Detailed error information is attached in the CSV file.' if csv_path else 'No errors encountered - all tests passed!'}
+
+This is an automated notification from the endpoint testing system.
+"""
+
+        msg.attach(MIMEText(body, 'plain'))
+
+        # Attach CSV if it exists
+        if csv_path and os.path.exists(csv_path):
+            with open(csv_path, 'rb') as f:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(f.read())
+
+            encoders.encode_base64(part)
+            part.add_header(
+                'Content-Disposition',
+                f'attachment; filename={os.path.basename(csv_path)}'
+            )
+            msg.attach(part)
+            logger.info(f"Attached CSV file: {csv_path}")
+
+        # Send email (Gmail SMTP)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+
+        logger.info(f"Email sent successfully to {recipient_email}")
+
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}")
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Main Lambda function entry point."""
     conn = None
@@ -256,6 +355,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         eval_function_name = payload.get('eval_function_name')
         grade_params_json = payload.get('grade_params_json')
+        recipient_email = payload.get('recipient_email')
 
         if not endpoint_to_test or not eval_function_name:
             missing_fields = []
@@ -268,6 +368,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
 
         results = test_endpoint(endpoint_to_test, data_for_test)
+
+        # Write errors to CSV and send email
+        csv_path = None
+        if results['list_of_errors']:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            csv_filename = f"endpoint_test_errors_{eval_function_name}_{timestamp}.csv"
+            csv_path = write_errors_to_csv(results['list_of_errors'], csv_filename)
+
+        # Send email notification with results
+        send_email_with_results(results, csv_path, endpoint_to_test, eval_function_name)
 
         return {
             "statusCode": 200,
