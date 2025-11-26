@@ -329,7 +329,7 @@ This is an automated notification from the endpoint testing system.
             logger.info(f"Attached CSV file: {csv_path}")
 
         # Send email (Gmail SMTP)
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP('mail.privateemail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
         server.send_message(msg)
@@ -377,7 +377,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             csv_path = write_errors_to_csv(results['list_of_errors'], csv_filename)
 
         # Send email notification with results
-        send_email_with_results(results, csv_path, endpoint_to_test, eval_function_name)
+        send_email_with_results(results, csv_path, endpoint_to_test, eval_function_name, recipient_email)
 
         return {
             "statusCode": 200,
