@@ -50,7 +50,7 @@ jobs:
         run: pip install -r requirements.txt
         working-directory: ./Database-Testing
 
-      - name: Run Test Script with Argparse
+      - name: Run Test Script
         id: run_script
         env:
           DB_USER: ${{ secrets.DB_USER }}
@@ -61,7 +61,7 @@ jobs:
           LOG_LEVEL: DEBUG
         working-directory: ./Database-Testing
         run: |
-          python3 test_evaluation_function_argparse.py \
+          python3 test_evaluation_function.py \
             --endpoint "${{ secrets.TEST_API_ENDPOINT }}" \
             --eval_function_name "${{ inputs.eval_function }}" \
             --sql_limit "${{ inputs.sql_limit }}" \
