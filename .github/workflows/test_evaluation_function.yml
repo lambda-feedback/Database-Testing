@@ -36,6 +36,10 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          repository: 'lambda-feedback/Database-Test'
+          ref: main
+          token: ${{ github.token }}
 
       - name: Set up Python Environment
         uses: actions/setup-python@v5
