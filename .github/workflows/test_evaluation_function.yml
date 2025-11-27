@@ -20,15 +20,15 @@ on:
     secrets:
       # Explicitly declare the secrets the reusable workflow needs
       DB_USER:
-        required: true
+        required: false
       DB_PASSWORD:
-        required: true
+        required: false
       DB_HOST:
-        required: true
+        required: false
       DB_PORT:
-        required: true
+        required: false
       DB_NAME:
-        required: true
+        required: false
 
 jobs:
   run_test:
