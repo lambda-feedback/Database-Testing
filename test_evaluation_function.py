@@ -271,14 +271,24 @@ def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional
 
 # --- Main Entry Point ---
 
-def start_test(event: Dict[str, Any], context: Any) -> None:
-    """Main function entry point, prints results as JSON to stdout."""
+
+import argparse
+import json
+import sys
+from dotenv import load_dotenv
+from datetime import datetime
+import os
+import logging
+
+# Import everything else from your original script (functions remain unchanged)
+# Assume lambda_handler and helper functions are defined above this block
+
+def start_test(event, context):
+    """Main function entry point, prints results as JSON and returns summary dict."""
     conn = None
     csv_filename = None
-
     logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
     logger.debug("Starting lambda_handler execution.")
-
     try:
         if 'body' in event and isinstance(event['body'], str):
             payload = json.loads(event['body'])
@@ -287,7 +297,6 @@ def start_test(event: Dict[str, Any], context: Any) -> None:
 
         endpoint_to_test = payload.get('endpoint')
         sql_limit = int(payload.get('sql_limit', DEFAULT_SQL_LIMIT))
-
         eval_function_name = payload.get('eval_function_name')
         grade_params_json = payload.get('grade_params_json')
 
@@ -298,9 +307,7 @@ def start_test(event: Dict[str, Any], context: Any) -> None:
             raise ValueError(f"Missing required input fields: {', '.join(missing_fields)}")
 
         conn = get_db_connection()
-
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
-
         results = test_endpoint(endpoint_to_test, data_for_test)
 
         if results['list_of_errors']:
@@ -316,25 +323,18 @@ def start_test(event: Dict[str, Any], context: Any) -> None:
         }
 
         print(json.dumps(results_summary))
-
-        if results['number_of_errors'] > 0:
-            logger.error(f"Testing completed with {results['number_of_errors']} errors.")
+        return results_summary
 
     except Exception as e:
-        logger.error(f"Overall function error: {e}", exc_info=True)
-        print(json.dumps({"error": str(e), "status": "failed"}))
-        sys.exit(1)
-
+        error_dict = {"error": str(e), "status": "failed"}
+        print(json.dumps(error_dict))
+        return error_dict
     finally:
         if conn:
             conn.close()
 
-
-
 if __name__ == "__main__":
-    from dotenv import load_dotenv
     load_dotenv()
-
     parser = argparse.ArgumentParser(description="Run endpoint validation tests.")
     parser.add_argument("--endpoint", required=True, help="API endpoint to test")
     parser.add_argument("--eval_function_name", required=True, help="Evaluation function name")
@@ -357,8 +357,13 @@ if __name__ == "__main__":
     print(f"SQL Limit: {test_event['sql_limit']}")
     print("-" * 50)
 
-    start_test(test_event, None)
+    results = start_test(test_event, None)
+
+    # Write results to report_data.json
+    with open("report_data.json", "w") as f:
+        f.write(json.dumps(results))
 
     print("-" * 50)
     print("Local execution finished. Check console output for logs and JSON summary.")
     print("-" * 50)
+
