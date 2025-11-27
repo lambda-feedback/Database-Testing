@@ -1,4 +1,4 @@
-# .github/workflows/test_endpoint.yml
+# .github/workflows/test_evaluation_function.yml
 name: Endpoint Validation Test
 
 on:
@@ -76,7 +76,7 @@ jobs:
           }'
           
           # 2. Execute script and pipe the final JSON summary to a file
-          python3 test_endpoint.py <<< "$EVENT_PAYLOAD" > report_data.json
+          python3 test_evaluation_function.py <<< "$EVENT_PAYLOAD" > report_data.json
           
           # 3. Read the output file to get the JSON data
           REPORT_DATA=$(cat report_data.json)

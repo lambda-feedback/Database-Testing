@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Copy the function code
-COPY app.py .
+COPY test_evaluation_function.py .
 
 # Set the CMD to your handler (app.lambda_handler)
 CMD ["app.lambda_handler"]
