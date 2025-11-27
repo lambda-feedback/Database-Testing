@@ -47,11 +47,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
         working-directory: ./Database-Testing
+        run: |
+          set -euo pipefail
+          pip install -r requirements.txt
 
-      - name: Run Test Script
+      - name: Run Test Script with Argparse
         id: run_script
+        working-directory: ./Database-Testing
         env:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
@@ -59,19 +62,64 @@ jobs:
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_NAME: ${{ secrets.DB_NAME }}
           LOG_LEVEL: DEBUG
-        working-directory: ./Database-Testing
         run: |
-          python3 test_evaluation_function.py \
+          set -euo pipefail
+
+          # Run the argparse-enabled script
+          python3 test_evaluation_function_argparse.py \
             --endpoint "${{ secrets.TEST_API_ENDPOINT }}" \
             --eval_function_name "${{ inputs.eval_function }}" \
             --sql_limit "${{ inputs.sql_limit }}" \
             --grade_params_json ""
 
-          # Capture JSON output from script
-          REPORT_DATA=$(cat report_data.json)
-          echo "error_count=$(echo $REPORT_DATA | jq -r '.number_of_errors')" >> $GITHUB_OUTPUT
-          echo "csv_filename=$(echo $REPORT_DATA | jq -r '.csv_filename')" >> $GITHUB_OUTPUT
+          # Verify and use the report_data.json created by the script
+          if [ ! -f report_data.json ]; then
+            echo "report_data.json not found!"
+            exit 1
+          fi
 
-          ERROR_COUNT=$(echo $REPORT_DATA | jq -r '.number_of_errors')
-          if [ "$ERROR_COUNT" -gt 0 ]; then
-            echo "::error file=test_evaluation_function_argparse.py::Test completed with $ERROR_COUNT errors."
+          REPORT_DATA="$(cat report_data.json)"
+          echo "error_count=$(echo "$REPORT_DATA" | jq -r '.number_of_errors')" >> "$GITHUB_OUTPUT"
+          echo "csv_filename=$(echo "$REPORT_DATA" | jq -r '.csv_filename')" >> "$GITHUB_OUTPUT"
+
+          ERROR_COUNT="$(echo "$REPORT_DATA" | jq -r '.number_of_errors')"
+          if [ "${ERROR_COUNT}" -gt 0 ]; then
+             echo "::error file=test_evaluation_function_argparse.py::Test completed with ${ERROR_COUNT} errors."
+          fi
+
+      - name: 📊 Create Job Summary Report
+        working-directory: ./Database-Testing
+        run: |
+          set -euo pipefail
+          REPORT_DATA="$(cat report_data.json)"
+          PASSES="$(echo "$REPORT_DATA" | jq -r '.pass_count')"
+          TOTAL="$(echo "$REPORT_DATA" | jq -r '.total_count')"
+          ERRORS="$(echo "$REPORT_DATA" | jq -r '.number_of_errors')"
+          PASS_RATE="$(echo "scale=2; $PASSES / $TOTAL * 100" | bc -l)"
+
+          STATUS_EMOJI="✅"
+          if [ "$ERRORS" -gt 0 ]; then
+              STATUS_EMOJI="❌"
+          fi
+
+          {
+            echo "## ${STATUS_EMOJI} Endpoint Validation Report"
+            echo "---"
+            echo "**Endpoint:** ${{ secrets.TEST_API_ENDPOINT }}"
+            echo "**Evaluation Function:** ${{ inputs.eval_function }}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| :--- | :--- |"
+            echo "| **Total Tests** | ${TOTAL} |"
+            echo "| **Passed** | ${PASSES} |"
+            echo "| **Failed** | **${ERRORS}** |"
+            echo "| **Pass Rate** | ${PASS_RATE}% |"
+            echo "---"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 📦 Upload Error CSV Artifact
+        if: steps.run_script.outputs.csv_filename != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.eval_function }}_error_report
+          path: ${{ steps.run_script.outputs.csv_filename }}
