@@ -69,7 +69,7 @@ jobs:
         run: |
           # 1. Prepare event payload as JSON for the lambda_handler
           EVENT_PAYLOAD='{
-            "endpoint": "${{ inputs.endpoint }}",
+            "endpoint": "${{ secrets.TEST_API_ENDPOINT }}",
             "eval_function_name": "${{ inputs.eval_function }}",
             "grade_params_json": "",
             "sql_limit": ${{ inputs.sql_limit }}
