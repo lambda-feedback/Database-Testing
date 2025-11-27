@@ -4,10 +4,6 @@ name: Endpoint Validation Test
 on:
   workflow_call:
     inputs:
-      endpoint:
-        description: 'API Endpoint URL to test'
-        required: true
-        type: string
       eval_function:
         description: 'Evaluation Function Name'
         required: true
@@ -19,6 +15,10 @@ on:
         default: 1000
     secrets:
       # Explicitly declare the secrets the reusable workflow needs
+      TEST_API_ENDPOINT:
+        description: 'API Endpoint URL to test'
+        required: false
+        type: string
       DB_USER:
         required: false
       DB_PASSWORD:
@@ -62,7 +62,6 @@ jobs:
 
         run: |
           # 1. Prepare event payload as JSON for the lambda_handler
-          # Removed recipient_email from payload
           EVENT_PAYLOAD='{
             "endpoint": "${{ inputs.endpoint }}",
             "eval_function_name": "${{ inputs.eval_function }}",
