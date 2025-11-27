@@ -2,17 +2,15 @@ import os
 import json
 import logging
 import csv
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
+import sys
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 import requests
+from dotenv import load_dotenv
 
+# --- Configuration ---
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 
 logger = logging.getLogger()
@@ -22,9 +20,17 @@ except ValueError:
     logger.warning(f"Invalid log level '{LOG_LEVEL}' set. Defaulting to INFO.")
     logger.setLevel(logging.INFO)
 
-DEFAULT_SQL_LIMIT = 1000
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+DEFAULT_SQL_LIMIT = 100
 MAX_ERROR_THRESHOLD = 50
 
+
+# --- Database Functions ---
 
 def get_db_connection() -> Connection:
     """Establishes a connection to the PostgreSQL database using SQLAlchemy."""
@@ -54,19 +60,16 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     """
     limit = max(1, min(sql_limit, DEFAULT_SQL_LIMIT))
 
-    # Start with mandatory filters
     where_clauses = ["EF.name = :name_param"]
     params = {
         "name_param": eval_function_name,
         "limit_param": limit
     }
 
-    # Conditionally add the gradeParams filter
     if grade_params_json:
         where_clauses.append("RA.\"gradeParams\"::jsonb = (:params_param)::jsonb")
         params["params_param"] = grade_params_json
 
-    # Combine clauses with AND
     where_sql = " AND ".join(where_clauses)
 
     sql_query_template = f"""
@@ -102,6 +105,8 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     logger.info(f"Successfully fetched {len(data_records)} records.")
     return data_records
 
+
+# --- API Request and Validation Helpers ---
 
 def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
     """Constructs the JSON payload for the API request from the DB record."""
@@ -185,9 +190,11 @@ def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional
         }
 
 
+# --- Synchronous Execution Core ---
+
 def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dict[
     str, Any]:
-    """Main function to test the endpoint, coordinating the smaller helper functions."""
+    """Main function to test the endpoint, processing requests sequentially (synchronously)."""
     total_requests = len(data_records)
     successful_requests = 0
     errors = []
@@ -195,7 +202,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dic
 
     endpoint_path = base_endpoint
 
-    logger.info(f"Starting tests on endpoint: {endpoint_path}")
+    logger.info(f"Starting synchronous tests on endpoint: {endpoint_path}")
 
     for i, record in enumerate(data_records):
         submission_id = record.get('id')
@@ -233,6 +240,8 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dic
     }
 
 
+# --- Reporting Functions ---
+
 def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional[str]:
     """Write error list to CSV file."""
     if not errors:
@@ -240,9 +249,8 @@ def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional
         return None
 
     try:
-        filepath = f"/tmp/{filename}"
+        filepath = filename
 
-        # Get all unique keys from all error dictionaries
         fieldnames = set()
         for error in errors:
             fieldnames.update(error.keys())
@@ -261,89 +269,16 @@ def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional
         return None
 
 
-def send_email_with_results(results: Dict[str, Any], csv_path: Optional[str],
-                            endpoint: str, eval_function_name: str, recipient_email: str):
-    """Send email with test results and CSV attachment."""
+# --- Main Entry Point ---
 
-    # Get email config from environment variables
-    sender_email = os.environ.get('SENDER_EMAIL')
-    sender_password = os.environ.get('SENDER_PASSWORD')
-
-    if not all([sender_email, sender_password, recipient_email]):
-        logger.warning("Email credentials not configured. Skipping email notification.")
-        return
-
-    try:
-        # Calculate pass rate
-        pass_count = results['pass_count']
-        total_count = results['total_count']
-        pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
-
-        # Determine status
-        status = "✓ PASSED" if results['number_of_errors'] == 0 else "✗ FAILED"
-
-        # Create email
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = recipient_email
-        msg['Subject'] = f"Endpoint Test Results - {status} - {eval_function_name}"
-
-        # Email body
-        body = f"""
-Evaluation Function Testing Report
-=======================
-
-Test Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Endpoint: {endpoint}
-Evaluation Function: {eval_function_name}
-
-Results Summary:
-----------------
-Status: {status}
-Pass Rate: {pass_rate:.1f}% ({pass_count}/{total_count})
-Total Tests: {total_count}
-Passed: {pass_count}
-Failed: {results['number_of_errors']}
-
-{f"⚠ Warning: Testing stopped early after reaching {MAX_ERROR_THRESHOLD} errors." if results['number_of_errors'] >= MAX_ERROR_THRESHOLD else ""}
-
-{'Detailed error information is attached in the CSV file.' if csv_path else 'No errors encountered - all tests passed!'}
-
-This is an automated notification from the endpoint testing system.
-"""
-
-        msg.attach(MIMEText(body, 'plain'))
-
-        # Attach CSV if it exists
-        if csv_path and os.path.exists(csv_path):
-            with open(csv_path, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-
-            encoders.encode_base64(part)
-            part.add_header(
-                'Content-Disposition',
-                f'attachment; filename={os.path.basename(csv_path)}'
-            )
-            msg.attach(part)
-            logger.info(f"Attached CSV file: {csv_path}")
-
-        # Send email (Gmail SMTP)
-        server = smtplib.SMTP('mail.privateemail.com', 587)
-        server.starttls()
-        server.login(sender_email, sender_password)
-        server.send_message(msg)
-        server.quit()
-
-        logger.info(f"Email sent successfully to {recipient_email}")
-
-    except Exception as e:
-        logger.error(f"Failed to send email: {e}")
-
-
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Main Lambda function entry point."""
+def lambda_handler(event: Dict[str, Any], context: Any) -> None:
+    """Main function entry point, prints results as JSON to stdout."""
     conn = None
+    csv_filename = None
+
+    logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
+    logger.debug("Starting lambda_handler execution.")
+
     try:
         if 'body' in event and isinstance(event['body'], str):
             payload = json.loads(event['body'])
@@ -355,7 +290,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         eval_function_name = payload.get('eval_function_name')
         grade_params_json = payload.get('grade_params_json')
-        recipient_email = payload.get('recipient_email')
 
         if not endpoint_to_test or not eval_function_name:
             missing_fields = []
@@ -369,32 +303,45 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         results = test_endpoint(endpoint_to_test, data_for_test)
 
-        # Write errors to CSV and send email
-        csv_path = None
         if results['list_of_errors']:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             csv_filename = f"endpoint_test_errors_{eval_function_name}_{timestamp}.csv"
-            csv_path = write_errors_to_csv(results['list_of_errors'], csv_filename)
+            write_errors_to_csv(results['list_of_errors'], csv_filename)
 
-        # Send email notification with results
-        send_email_with_results(results, csv_path, endpoint_to_test, eval_function_name, recipient_email)
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "pass_ratio": f"{results['pass_count']}/{results['total_count']}",
-                "passes": results['pass_count'],
-                "total": results['total_count'],
-                "errors_list": results['list_of_errors']
-            })
+        results_summary = {
+            "pass_count": results['pass_count'],
+            "total_count": results['total_count'],
+            "number_of_errors": results['number_of_errors'],
+            "csv_filename": csv_filename if results['list_of_errors'] else None
         }
+
+        print(json.dumps(results_summary))
+
+        if results['number_of_errors'] > 0:
+            logger.error(f"Testing completed with {results['number_of_errors']} errors.")
 
     except Exception as e:
-        logger.error(f"Overall function error: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+        logger.error(f"Overall function error: {e}", exc_info=True)
+        print(json.dumps({"error": str(e), "status": "failed"}))
+        sys.exit(1)
+
     finally:
         if conn:
             conn.close()
+
+
+if __name__ == "__main__":
+    load_dotenv()
+
+    test_event = {
+        'endpoint': os.environ.get('ENDPOINT'),
+        'eval_function_name': os.environ.get('EVAL_FUNC_NAME'),
+        'sql_limit': int(os.environ.get('SQL_LIMIT', str(DEFAULT_SQL_LIMIT))),
+        'grade_params_json': os.environ.get('GRADE_PARAMS', ''),
+    }
+
+    print("-" * 50)
+    print("Starting local execution of lambda_handler...")
+    lambda_handler(test_event, None)
+    print("Local execution finished. Check console output for logs and JSON summary.")
+    print("-" * 50)
