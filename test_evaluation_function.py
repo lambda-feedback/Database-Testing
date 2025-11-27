@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import logging
@@ -8,7 +9,6 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 import requests
-from dotenv import load_dotenv
 
 # --- Configuration ---
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -271,7 +271,7 @@ def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional
 
 # --- Main Entry Point ---
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> None:
+def start_test(event: Dict[str, Any], context: Any) -> None:
     """Main function entry point, prints results as JSON to stdout."""
     conn = None
     csv_filename = None
@@ -330,18 +330,35 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
             conn.close()
 
 
+
 if __name__ == "__main__":
+    from dotenv import load_dotenv
     load_dotenv()
 
+    parser = argparse.ArgumentParser(description="Run endpoint validation tests.")
+    parser.add_argument("--endpoint", required=True, help="API endpoint to test")
+    parser.add_argument("--eval_function_name", required=True, help="Evaluation function name")
+    parser.add_argument("--sql_limit", type=int, default=100, help="Max number of records to fetch")
+    parser.add_argument("--grade_params_json", default="", help="Grade parameters as JSON string")
+
+    args = parser.parse_args()
+
     test_event = {
-        'endpoint': os.environ.get('ENDPOINT'),
-        'eval_function_name': os.environ.get('EVAL_FUNC_NAME'),
-        'sql_limit': int(os.environ.get('SQL_LIMIT', str(DEFAULT_SQL_LIMIT))),
-        'grade_params_json': os.environ.get('GRADE_PARAMS', ''),
+        "endpoint": args.endpoint,
+        "eval_function_name": args.eval_function_name,
+        "sql_limit": args.sql_limit,
+        "grade_params_json": args.grade_params_json,
     }
 
     print("-" * 50)
-    print("Starting local execution of lambda_handler...")
-    lambda_handler(test_event, None)
+    print("Starting local execution of lambda_handler with argparse...")
+    print(f"Endpoint: {test_event['endpoint']}")
+    print(f"Function: {test_event['eval_function_name']}")
+    print(f"SQL Limit: {test_event['sql_limit']}")
+    print("-" * 50)
+
+    start_test(test_event, None)
+
+    print("-" * 50)
     print("Local execution finished. Check console output for logs and JSON summary.")
     print("-" * 50)
