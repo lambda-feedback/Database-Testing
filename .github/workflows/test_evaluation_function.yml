@@ -40,6 +40,7 @@ jobs:
           repository: 'lambda-feedback/Database-Testing'
           ref: main
           token: ${{ github.token }}
+          path: Database-Testing
 
       - name: Set up Python Environment
         uses: actions/setup-python@v5
@@ -48,6 +49,7 @@ jobs:
 
       - name: Install Dependencies
         run: pip install -r requirements.txt
+        working-directory: ./Database-Testing
 
       - name: Run Test Script and Capture Results
         id: run_script
@@ -63,6 +65,7 @@ jobs:
           LOG_LEVEL: DEBUG
           SQL_LIMIT: ${{ inputs.sql_limit }}
 
+        working-directory: ./Database-Testing
         run: |
           # 1. Prepare event payload as JSON for the lambda_handler
           EVENT_PAYLOAD='{
@@ -89,6 +92,7 @@ jobs:
           fi
 
       - name: 📊 Create Job Summary Report
+        working-directory: ./Database-Testing
         run: |
           REPORT_DATA=$(cat report_data.json)
           PASSES=$(echo $REPORT_DATA | jq -r '.pass_count')
