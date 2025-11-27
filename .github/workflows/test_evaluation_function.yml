@@ -18,7 +18,6 @@ on:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
         required: false
-        type: string
       DB_USER:
         required: false
       DB_PASSWORD:
