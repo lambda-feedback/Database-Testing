@@ -64,26 +64,41 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Run the argparse-enabled script
-          python3 test_evaluation_function.py \
+          # Run the argparse-enabled script and capture exit code
+          if ! python3 test_evaluation_function.py \
             --endpoint "${{ secrets.TEST_API_ENDPOINT }}" \
             --eval_function_name "${{ inputs.eval_function }}" \
             --sql_limit "${{ inputs.sql_limit }}" \
-            --grade_params_json ""
+            --grade_params_json ""; then
+            echo "::error::Python script failed with non-zero exit code"
+            exit 1
+          fi
 
           # Verify and use the report_data.json created by the script
           if [ ! -f report_data.json ]; then
-            echo "report_data.json not found!"
+            echo "::error::report_data.json not found!"
             exit 1
           fi
 
           REPORT_DATA="$(cat report_data.json)"
-          echo "error_count=$(echo "$REPORT_DATA" | jq -r '.number_of_errors')" >> "$GITHUB_OUTPUT"
-          echo "csv_filename=$(echo "$REPORT_DATA" | jq -r '.csv_filename')" >> "$GITHUB_OUTPUT"
+          
+          # Check for error status in the JSON response
+          STATUS="$(echo "$REPORT_DATA" | jq -r '.status // "unknown"')"
+          if [ "$STATUS" = "failed" ]; then
+            ERROR_MSG="$(echo "$REPORT_DATA" | jq -r '.error // "Unknown error"')"
+            echo "::error::Script returned failed status: ${ERROR_MSG}"
+            exit 1
+          fi
 
-          ERROR_COUNT="$(echo "$REPORT_DATA" | jq -r '.number_of_errors')"
+          # Extract metrics
+          ERROR_COUNT="$(echo "$REPORT_DATA" | jq -r '.number_of_errors // 0')"
+          echo "error_count=${ERROR_COUNT}" >> "$GITHUB_OUTPUT"
+          
+          CSV_FILE="$(echo "$REPORT_DATA" | jq -r '.csv_filename // ""')"
+          echo "csv_filename=${CSV_FILE}" >> "$GITHUB_OUTPUT"
+
           if [ "${ERROR_COUNT}" -gt 0 ]; then
-             echo "::error file=test_evaluation_function_argparse.py::Test completed with ${ERROR_COUNT} errors."
+             echo "::error file=test_evaluation_function.py::Test completed with ${ERROR_COUNT} errors."
           fi
 
       - name: 📊 Create Job Summary Report
@@ -91,11 +106,38 @@ jobs:
         working-directory: ./Database-Testing
         run: |
           set -euo pipefail
+          
+          if [ ! -f report_data.json ]; then
+            echo "## ❌ Endpoint Validation Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Status:** Failed - No report data generated" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          
           REPORT_DATA="$(cat report_data.json)"
-          PASSES="$(echo "$REPORT_DATA" | jq -r '.pass_count')"
-          TOTAL="$(echo "$REPORT_DATA" | jq -r '.total_count')"
-          ERRORS="$(echo "$REPORT_DATA" | jq -r '.number_of_errors')"
-          PASS_RATE="$(echo "scale=2; $PASSES / $TOTAL * 100" | bc -l)"
+          
+          # Check if this is an error response
+          STATUS="$(echo "$REPORT_DATA" | jq -r '.status // "unknown"')"
+          if [ "$STATUS" = "failed" ]; then
+            ERROR_MSG="$(echo "$REPORT_DATA" | jq -r '.error // "Unknown error"')"
+            {
+              echo "## ❌ Endpoint Validation Report"
+              echo "---"
+              echo "**Status:** Failed"
+              echo "**Error:** ${ERROR_MSG}"
+              echo "---"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          
+          PASSES="$(echo "$REPORT_DATA" | jq -r '.pass_count // 0')"
+          TOTAL="$(echo "$REPORT_DATA" | jq -r '.total_count // 0')"
+          ERRORS="$(echo "$REPORT_DATA" | jq -r '.number_of_errors // 0')"
+          
+          if [ "$TOTAL" -gt 0 ]; then
+            PASS_RATE="$(echo "scale=2; $PASSES / $TOTAL * 100" | bc -l)"
+          else
+            PASS_RATE="0"
+          fi
 
           STATUS_EMOJI="✅"
           if [ "$ERRORS" -gt 0 ]; then
@@ -122,7 +164,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.eval_function }}_error_report
-          path: ${{ steps.run_script.outputs.csv_filename }}
+          path: Database-Testing/${{ steps.run_script.outputs.csv_filename }}
 
       - name: ❌ Fail Workflow if Errors Detected
         if: steps.run_script.outputs.error_count > 0
