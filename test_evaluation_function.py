@@ -4,6 +4,7 @@ import json
 import logging
 import csv
 import sys
+import time
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import create_engine, text
@@ -12,6 +13,7 @@ import requests
 
 # --- Configuration ---
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+DEFAULT_REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '2.0'))  # Default 0.5 seconds
 
 logger = logging.getLogger()
 try:
@@ -192,9 +194,9 @@ def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional
 
 # --- Synchronous Execution Core ---
 
-def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dict[
-    str, Any]:
-    """Main function to test the endpoint, processing requests sequentially (synchronously)."""
+def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
+                  request_delay: float = DEFAULT_REQUEST_DELAY) -> Dict[str, Any]:
+    """Main function to test the endpoint, processing requests sequentially with delay between requests."""
     total_requests = len(data_records)
     successful_requests = 0
     errors = []
@@ -203,6 +205,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dic
     endpoint_path = base_endpoint
 
     logger.info(f"Starting synchronous tests on endpoint: {endpoint_path}")
+    logger.info(f"Request delay: {request_delay} seconds between requests")
 
     for i, record in enumerate(data_records):
         submission_id = record.get('id')
@@ -210,6 +213,11 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dic
         if error_count >= MAX_ERROR_THRESHOLD:
             logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
             break
+
+        # Add delay before request (except for the first one)
+        if i > 0 and request_delay > 0:
+            time.sleep(request_delay)
+            logger.debug(f"Waited {request_delay}s before request {i + 1}/{total_requests}")
 
         payload = _prepare_payload(record)
         response_data, execution_error = _execute_request(endpoint_path, payload)
@@ -231,6 +239,10 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]]) -> Dic
             errors.append(validation_error)
         else:
             successful_requests += 1
+
+        # Log progress every 10 requests
+        if (i + 1) % 10 == 0:
+            logger.info(f"Progress: {i + 1}/{total_requests} requests completed")
 
     return {
         "pass_count": successful_requests,
@@ -271,24 +283,13 @@ def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional
 
 # --- Main Entry Point ---
 
-
-import argparse
-import json
-import sys
-from dotenv import load_dotenv
-from datetime import datetime
-import os
-import logging
-
-# Import everything else from your original script (functions remain unchanged)
-# Assume lambda_handler and helper functions are defined above this block
-
 def start_test(event, context):
     """Main function entry point, prints results as JSON and returns summary dict."""
     conn = None
     csv_filename = None
     logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
     logger.debug("Starting lambda_handler execution.")
+
     try:
         if 'body' in event and isinstance(event['body'], str):
             payload = json.loads(event['body'])
@@ -299,16 +300,19 @@ def start_test(event, context):
         sql_limit = int(payload.get('sql_limit', DEFAULT_SQL_LIMIT))
         eval_function_name = payload.get('eval_function_name')
         grade_params_json = payload.get('grade_params_json')
+        request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
 
         if not endpoint_to_test or not eval_function_name:
             missing_fields = []
             if not endpoint_to_test: missing_fields.append("'endpoint'")
             if not eval_function_name: missing_fields.append("'eval_function_name'")
-            raise ValueError(f"Missing required input fields: {', '.join(missing_fields)}")
+            error_msg = f"Missing required input fields: {', '.join(missing_fields)}"
+            logger.error(error_msg)
+            sys.exit(1)  # Exit with error code
 
         conn = get_db_connection()
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
-        results = test_endpoint(endpoint_to_test, data_for_test)
+        results = test_endpoint(endpoint_to_test, data_for_test, request_delay)
 
         if results['list_of_errors']:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -328,18 +332,25 @@ def start_test(event, context):
     except Exception as e:
         error_dict = {"error": str(e), "status": "failed"}
         print(json.dumps(error_dict))
-        return error_dict
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)  # Exit with error code
     finally:
         if conn:
             conn.close()
 
+
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+
     load_dotenv()
+
     parser = argparse.ArgumentParser(description="Run endpoint validation tests.")
     parser.add_argument("--endpoint", required=True, help="API endpoint to test")
     parser.add_argument("--eval_function_name", required=True, help="Evaluation function name")
     parser.add_argument("--sql_limit", type=int, default=100, help="Max number of records to fetch")
     parser.add_argument("--grade_params_json", default="", help="Grade parameters as JSON string")
+    parser.add_argument("--request_delay", type=float, default=DEFAULT_REQUEST_DELAY,
+                        help="Delay in seconds between requests (default: 0.5)")
 
     args = parser.parse_args()
 
@@ -348,6 +359,7 @@ if __name__ == "__main__":
         "eval_function_name": args.eval_function_name,
         "sql_limit": args.sql_limit,
         "grade_params_json": args.grade_params_json,
+        "request_delay": args.request_delay,
     }
 
     print("-" * 50)
@@ -355,6 +367,7 @@ if __name__ == "__main__":
     print(f"Endpoint: {test_event['endpoint']}")
     print(f"Function: {test_event['eval_function_name']}")
     print(f"SQL Limit: {test_event['sql_limit']}")
+    print(f"Request Delay: {test_event['request_delay']}s")
     print("-" * 50)
 
     results = start_test(test_event, None)
@@ -366,4 +379,3 @@ if __name__ == "__main__":
     print("-" * 50)
     print("Local execution finished. Check console output for logs and JSON summary.")
     print("-" * 50)
-
