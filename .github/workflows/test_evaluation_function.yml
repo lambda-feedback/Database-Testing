@@ -1,4 +1,3 @@
-
 name: Endpoint Validation Test
 
 on:
@@ -88,6 +87,7 @@ jobs:
           fi
 
       - name: 📊 Create Job Summary Report
+        if: always()
         working-directory: ./Database-Testing
         run: |
           set -euo pipefail
@@ -118,8 +118,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 📦 Upload Error CSV Artifact
-        if: steps.run_script.outputs.csv_filename != ''
+        if: always() && steps.run_script.outputs.csv_filename != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.eval_function }}_error_report
           path: ${{ steps.run_script.outputs.csv_filename }}
+
+      - name: ❌ Fail Workflow if Errors Detected
+        if: steps.run_script.outputs.error_count > 0
+        run: |
+          echo "::error::Workflow failed due to ${{ steps.run_script.outputs.error_count }} test errors"
+          exit 1
