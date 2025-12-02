@@ -28,6 +28,8 @@ if not logger.handlers:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
+logging.info(f"LOG LEVEL: {LOG_LEVEL}")
+
 DEFAULT_SQL_LIMIT = 100
 MAX_ERROR_THRESHOLD = 50
 
@@ -131,7 +133,6 @@ def _execute_request(endpoint_path: str, payload: Dict[str, Any]) -> Tuple[
     Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Executes the POST request. Returns (response_data, error_details)."""
     try:
-        logging.debug(f"PAYLOAD: {payload}")
         response = requests.post(
             endpoint_path,
             json=payload,
@@ -202,9 +203,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     errors = []
     error_count = 0
 
-    endpoint_path = base_endpoint
-
-    logger.info(f"Starting synchronous tests on endpoint: {endpoint_path}")
+    logger.info(f"Starting synchronous tests on endpoint")
     logger.info(f"Request delay: {request_delay} seconds between requests")
 
     for i, record in enumerate(data_records):
@@ -220,7 +219,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
             logger.debug(f"Waited {request_delay}s before request {i + 1}/{total_requests}")
 
         payload = _prepare_payload(record)
-        response_data, execution_error = _execute_request(endpoint_path, payload)
+        response_data, execution_error = _execute_request(base_endpoint, payload)
 
         logging.debug(f"RESPONSE: {response_data}")
 
