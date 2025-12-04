@@ -10,10 +10,12 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 import requests
+from google.cloud import firestore
 
 # --- Configuration ---
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-DEFAULT_REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '2.0'))  # Default 0.5 seconds
+DEFAULT_REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '2.0'))
+GCP_PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 
 logger = logging.getLogger()
 try:
@@ -32,6 +34,81 @@ logging.info(f"LOG LEVEL: {LOG_LEVEL}")
 
 DEFAULT_SQL_LIMIT = 100
 MAX_ERROR_THRESHOLD = 50
+REPORT_FILENAME = 'report_data.json'
+
+
+# --- Firestore Functions ---
+
+def get_firestore_client() -> firestore.Client:
+    """Initialize and return Firestore client."""
+    try:
+        if GCP_PROJECT_ID:
+            db = firestore.Client(project=GCP_PROJECT_ID)
+        else:
+            db = firestore.Client()  # Uses default credentials
+        logger.info("Firestore client initialized successfully")
+        return db
+    except Exception as e:
+        logger.error(f"Failed to initialize Firestore client: {e}")
+        raise
+
+
+def save_test_results_to_firestore(
+        db: firestore.Client,
+        results_summary: Dict[str, Any],
+        test_params: Dict[str, Any],
+        errors: List[Dict[str, Any]]
+) -> str:
+    """Save test results to Firestore."""
+    try:
+        # Prepare main document
+        test_result_doc = {
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'created_at': datetime.utcnow().isoformat(),
+            'eval_function_name': test_params.get('eval_function_name'),
+            'sql_limit': test_params.get('sql_limit'),
+            'request_delay': test_params.get('request_delay'),
+            'grade_params_json': test_params.get('grade_params_json', ''),
+            'pass_count': results_summary['pass_count'],
+            'total_count': results_summary['total_count'],
+            'number_of_errors': results_summary['number_of_errors'],
+            'pass_rate': round(results_summary['pass_count'] / results_summary['total_count'] * 100, 2) if
+            results_summary['total_count'] > 0 else 0,
+            'status': 'completed'
+        }
+
+        # Create main test result document
+        doc_ref = db.collection('test-results').document()
+        doc_ref.set(test_result_doc)
+        doc_id = doc_ref.id
+
+        logger.info(f"Test results saved to Firestore with ID: {doc_id}")
+
+        # Save errors as subcollection if there are any
+        if errors:
+            batch = db.batch()
+            errors_ref = doc_ref.collection('errors')
+
+            # Batch write errors (max 500 per batch)
+            for i, error in enumerate(errors):
+                if i > 0 and i % 500 == 0:
+                    batch.commit()
+                    batch = db.batch()
+
+                error_doc_ref = errors_ref.document()
+                batch.set(error_doc_ref, {
+                    'timestamp': firestore.SERVER_TIMESTAMP,
+                    **error
+                })
+
+            batch.commit()
+            logger.info(f"Saved {len(errors)} error records to Firestore subcollection")
+
+        return doc_id
+
+    except Exception as e:
+        logger.error(f"Failed to save results to Firestore: {e}")
+        raise
 
 
 # --- Database Functions ---
@@ -58,10 +135,7 @@ def get_db_connection() -> Connection:
 
 def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str) -> List[
     Dict[str, Any]]:
-    """
-    Fetches data using the provided complex query with SQLAlchemy.
-    Uses parameterized query execution for security.
-    """
+    """Fetches data using the provided complex query with SQLAlchemy."""
     limit = max(1, min(sql_limit, DEFAULT_SQL_LIMIT))
 
     where_clauses = ["EF.name = :name_param"]
@@ -197,7 +271,7 @@ def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional
 
 def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                   request_delay: float = DEFAULT_REQUEST_DELAY) -> Dict[str, Any]:
-    """Main function to test the endpoint, processing requests sequentially with delay between requests."""
+    """Main function to test the endpoint, processing requests sequentially."""
     total_requests = len(data_records)
     successful_requests = 0
     errors = []
@@ -251,45 +325,19 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     }
 
 
-# --- Reporting Functions ---
-
-def write_errors_to_csv(errors: List[Dict[str, Any]], filename: str) -> Optional[str]:
-    """Write error list to CSV file."""
-    if not errors:
-        logger.info("No errors to write to CSV.")
-        return None
-
-    try:
-        filepath = filename
-
-        fieldnames = set()
-        for error in errors:
-            fieldnames.update(error.keys())
-        fieldnames = sorted(list(fieldnames))
-
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(errors)
-
-        logger.info(f"CSV file created: {filepath}")
-        return filepath
-
-    except Exception as e:
-        logger.error(f"Failed to create CSV: {e}")
-        return None
-
-
 # --- Main Entry Point ---
 
 def start_test(event, context):
-    """Main function entry point, prints results as JSON and returns summary dict."""
+    """Main function entry point. Writes results to report_data.json."""
     conn = None
-    csv_filename = None
+
     logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
     logger.debug("Starting lambda_handler execution.")
 
     try:
+        # Initialize Firestore client
+        db = get_firestore_client()
+
         if 'body' in event and isinstance(event['body'], str):
             payload = json.loads(event['body'])
         else:
@@ -306,37 +354,74 @@ def start_test(event, context):
             if not endpoint_to_test: missing_fields.append("'endpoint'")
             if not eval_function_name: missing_fields.append("'eval_function_name'")
             error_msg = f"Missing required input fields: {', '.join(missing_fields)}"
+
+            # Write error to JSON before raising
+            with open(REPORT_FILENAME, 'w') as f:
+                json.dump({"status": "failed", "error": error_msg}, f)
+
             logger.error(error_msg)
-            sys.exit(1)  # Exit with error code
+            sys.exit(1)
+
+        test_params = {
+            'endpoint': endpoint_to_test,
+            'eval_function_name': eval_function_name,
+            'sql_limit': sql_limit,
+            'grade_params_json': grade_params_json,
+            'request_delay': request_delay
+        }
 
         conn = get_db_connection()
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
         results = test_endpoint(endpoint_to_test, data_for_test, request_delay)
 
-        if results['list_of_errors']:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            csv_filename = f"endpoint_test_errors_{eval_function_name}_{timestamp}.csv"
-            write_errors_to_csv(results['list_of_errors'], csv_filename)
-
+        # Prepare summary for report_data.json
         results_summary = {
+            "status": "success",
             "pass_count": results['pass_count'],
             "total_count": results['total_count'],
-            "number_of_errors": results['number_of_errors'],
-            "csv_filename": csv_filename if results['list_of_errors'] else None
+            "number_of_errors": results['number_of_errors']
         }
 
-        print(json.dumps(results_summary))
+        # Save to Firestore (required)
+        firestore_doc_id = save_test_results_to_firestore(
+            db,
+            results_summary,
+            test_params,
+            results['list_of_errors']
+        )
+
+        if not firestore_doc_id:
+            msg = "Failed to save results to Firestore"
+            logger.error(msg)
+            with open(REPORT_FILENAME, 'w') as f:
+                json.dump({"status": "failed", "error": msg}, f)
+            sys.exit(1)
+
+        results_summary['firestore_doc_id'] = firestore_doc_id
+        logger.info(f"Results successfully saved to Firestore: {firestore_doc_id}")
+
+        # WRITE TO FILE FOR GITHUB ACTIONS
+        with open(REPORT_FILENAME, 'w') as f:
+            json.dump(results_summary, f, indent=2)
+
+        print(json.dumps(results_summary))  # Optional: Print to stdout for logs
         return results_summary
 
     except Exception as e:
-        error_dict = {"error": str(e), "status": "failed"}
-        print(json.dumps(error_dict))
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)  # Exit with error code
+        error_msg = str(e)
+        logger.error(f"Fatal error: {error_msg}", exc_info=True)
+
+        # Write error to file so the workflow catches it nicely
+        with open(REPORT_FILENAME, 'w') as f:
+            json.dump({"status": "failed", "error": error_msg}, f)
+
+        sys.exit(1)
     finally:
         if conn:
             conn.close()
 
+
+# --- CLI Query Commands ---
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
@@ -349,7 +434,7 @@ if __name__ == "__main__":
     parser.add_argument("--sql_limit", type=int, default=100, help="Max number of records to fetch")
     parser.add_argument("--grade_params_json", default="", help="Grade parameters as JSON string")
     parser.add_argument("--request_delay", type=float, default=DEFAULT_REQUEST_DELAY,
-                        help="Delay in seconds between requests (default: 0.5)")
+                        help="Delay in seconds between requests (default: 2.0)")
 
     args = parser.parse_args()
 
@@ -362,19 +447,15 @@ if __name__ == "__main__":
     }
 
     print("-" * 50)
-    print("Starting local execution of lambda_handler with argparse...")
+    print("Starting test execution...")
     print(f"Endpoint: {test_event['endpoint']}")
     print(f"Function: {test_event['eval_function_name']}")
     print(f"SQL Limit: {test_event['sql_limit']}")
-    print(f"Request Delay: {test_event['request_delay']}s")
     print("-" * 50)
 
     results = start_test(test_event, None)
 
-    # Write results to report_data.json
-    with open("report_data.json", "w") as f:
-        f.write(json.dumps(results))
-
     print("-" * 50)
-    print("Local execution finished. Check console output for logs and JSON summary.")
+    print("Test execution finished.")
+    print(f"Results saved to Firestore with ID: {results.get('firestore_doc_id')}")
     print("-" * 50)

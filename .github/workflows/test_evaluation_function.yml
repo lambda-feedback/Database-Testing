@@ -51,7 +51,12 @@ jobs:
           set -euo pipefail
           pip install -r requirements.txt
 
-      - name: Run Test Script with Argparse
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Run Evaluation Function Against Database
         id: run_script
         working-directory: ./Database-Testing
         env:
@@ -73,7 +78,7 @@ jobs:
             exit 1
           fi
 
-          # Verify and use the report_data.json created by the script
+          # Verify report_data.json exists (needed for summary)
           if [ ! -f report_data.json ]; then
             echo "::error::report_data.json not found!"
             exit 1
@@ -89,19 +94,18 @@ jobs:
             exit 1
           fi
 
-          # Extract metrics
+          # Check for specific validation errors to log to console
           ERROR_COUNT="$(echo "$REPORT_DATA" | jq -r '.number_of_errors // 0')"
-          echo "error_count=${ERROR_COUNT}" >> "$GITHUB_OUTPUT"
           
-          CSV_FILE="$(echo "$REPORT_DATA" | jq -r '.csv_filename // ""')"
-          echo "csv_filename=${CSV_FILE}" >> "$GITHUB_OUTPUT"
-
           if [ "${ERROR_COUNT}" -gt 0 ]; then
              echo "::error file=test_evaluation_function.py::Test completed with ${ERROR_COUNT} errors."
+             # Do not exit 1 here if you want the Summary to display the failure stats nicely. 
+             # Only exit 1 if you want the pipeline to stop immediately (usually preferred for tests).
+             exit 1 
           fi
 
       - name: 📊 Create Job Summary Report
-        if: always()
+        if: always() # Run even if the previous step failed/found errors
         working-directory: ./Database-Testing
         run: |
           set -euo pipefail
@@ -157,10 +161,3 @@ jobs:
             echo "| **Pass Rate** | ${PASS_RATE}% |"
             echo "---"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 📦 Upload Error CSV Artifact
-        if: always() && steps.run_script.outputs.csv_filename != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.eval_function }}_error_report
-          path: Database-Testing/${{ steps.run_script.outputs.csv_filename }}
