@@ -2,7 +2,6 @@ import argparse
 import os
 import json
 import logging
-import csv
 import sys
 import time
 from typing import Dict, Any, List, Optional, Tuple
@@ -11,6 +10,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 import requests
 from google.cloud import firestore
+from google.oauth2 import service_account
+import base64
 
 # --- Configuration ---
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -39,27 +40,55 @@ REPORT_FILENAME = 'report_data.json'
 
 # --- Firestore Functions ---
 
-def get_firestore_client() -> firestore.Client:
-    """Initialize and return Firestore client."""
+def get_firestore_client() -> Tuple[firestore.Client, str]:
+    """Initialize and return Firestore client and project ID."""
     try:
-        if GCP_PROJECT_ID:
-            db = firestore.Client(project=GCP_PROJECT_ID)
+        creds_base64 = os.environ.get('GOOGLE_CREDENTIALS_BASE64')
+        creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+        credentials = None
+        project_id = GCP_PROJECT_ID
+
+        # Try base64 encoded credentials first
+        if creds_base64:
+            logger.info("Using base64 encoded credentials from environment")
+            creds_json = base64.b64decode(creds_base64).decode('utf-8')
+
+        # Use JSON credentials if available
+        if creds_json:
+            logger.info("Using JSON credentials from environment")
+            creds_dict = json.loads(creds_json)
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            project_id = project_id or creds_dict.get('project_id')
+            db = firestore.Client(project=project_id, credentials=credentials)
+        elif project_id:
+            logger.info(f"Using default credentials with project: {project_id}")
+            db = firestore.Client(project=project_id)
         else:
-            db = firestore.Client()  # Uses default credentials
-        logger.info("Firestore client initialized successfully")
-        return db
+            logger.info("Using default credentials")
+            db = firestore.Client()
+            project_id = db.project
+
+        logger.info(f"Firestore client initialized successfully for project: {project_id}")
+        return db, project_id
+
     except Exception as e:
         logger.error(f"Failed to initialize Firestore client: {e}")
         raise
 
 
+def get_firestore_console_link(project_id: str, collection: str, doc_id: str) -> str:
+    """Generate a link to the Firestore document in Google Cloud Console."""
+    return f"https://console.cloud.google.com/firestore/databases/-default-/data/panel/{collection}/{doc_id}?project={project_id}"
+
+
 def save_test_results_to_firestore(
         db: firestore.Client,
+        project_id: str,
         results_summary: Dict[str, Any],
         test_params: Dict[str, Any],
         errors: List[Dict[str, Any]]
-) -> str:
-    """Save test results to Firestore."""
+) -> Tuple[str, str]:
+    """Save test results to Firestore. Returns (doc_id, console_link)."""
     try:
         # Prepare main document
         test_result_doc = {
@@ -82,7 +111,11 @@ def save_test_results_to_firestore(
         doc_ref.set(test_result_doc)
         doc_id = doc_ref.id
 
+        # Generate console link
+        console_link = get_firestore_console_link(project_id, 'test-results', doc_id)
+
         logger.info(f"Test results saved to Firestore with ID: {doc_id}")
+        logger.info(f"View in console: {console_link}")
 
         # Save errors as subcollection if there are any
         if errors:
@@ -104,7 +137,7 @@ def save_test_results_to_firestore(
             batch.commit()
             logger.info(f"Saved {len(errors)} error records to Firestore subcollection")
 
-        return doc_id
+        return doc_id, console_link
 
     except Exception as e:
         logger.error(f"Failed to save results to Firestore: {e}")
@@ -329,6 +362,13 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
 
 def start_test(event, context):
     """Main function entry point. Writes results to report_data.json."""
+    # Load environment variables if available
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not available in production
+
     conn = None
 
     logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
@@ -336,7 +376,7 @@ def start_test(event, context):
 
     try:
         # Initialize Firestore client
-        db = get_firestore_client()
+        db, project_id = get_firestore_client()
 
         if 'body' in event and isinstance(event['body'], str):
             payload = json.loads(event['body'])
@@ -383,8 +423,9 @@ def start_test(event, context):
         }
 
         # Save to Firestore (required)
-        firestore_doc_id = save_test_results_to_firestore(
+        firestore_doc_id, console_link = save_test_results_to_firestore(
             db,
+            project_id,
             results_summary,
             test_params,
             results['list_of_errors']
@@ -398,13 +439,18 @@ def start_test(event, context):
             sys.exit(1)
 
         results_summary['firestore_doc_id'] = firestore_doc_id
+        results_summary['firestore_link'] = console_link
+
         logger.info(f"Results successfully saved to Firestore: {firestore_doc_id}")
+        logger.info(f"View results at: {console_link}")
 
         # WRITE TO FILE FOR GITHUB ACTIONS
         with open(REPORT_FILENAME, 'w') as f:
             json.dump(results_summary, f, indent=2)
 
         print(json.dumps(results_summary))  # Optional: Print to stdout for logs
+        print(f"\n🔗 View results in Firestore: {console_link}")
+
         return results_summary
 
     except Exception as e:
@@ -458,4 +504,5 @@ if __name__ == "__main__":
     print("-" * 50)
     print("Test execution finished.")
     print(f"Results saved to Firestore with ID: {results.get('firestore_doc_id')}")
+    print(f"🔗 View in console: {results.get('firestore_link')}")
     print("-" * 50)

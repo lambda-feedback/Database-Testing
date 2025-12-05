@@ -3,4 +3,7 @@ requests
 SQLAlchemy
 python-dotenv
 argparse
-google
+google-cloud-firestore
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
