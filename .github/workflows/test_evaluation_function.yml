@@ -10,7 +10,7 @@ on:
       sql_limit:
         description: 'Max number of records to fetch'
         required: false
-        type: number
+        type: string
         default: 1000
     secrets:
       TEST_API_ENDPOINT:
