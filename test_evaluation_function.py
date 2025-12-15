@@ -43,30 +43,14 @@ REPORT_FILENAME = 'report_data.json'
 def get_firestore_client() -> Tuple[firestore.Client, str]:
     """Initialize and return Firestore client and project ID."""
     try:
-        creds_base64 = os.environ.get('GOOGLE_CREDENTIALS_BASE64')
         creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-        credentials = None
         project_id = GCP_PROJECT_ID
 
-        # Try base64 encoded credentials first
-        if creds_base64:
-            logger.info("Using base64 encoded credentials from environment")
-            creds_json = base64.b64decode(creds_base64).decode('utf-8')
-
-        # Use JSON credentials if available
-        if creds_json:
-            logger.info("Using JSON credentials from environment")
-            creds_dict = json.loads(creds_json)
-            credentials = service_account.Credentials.from_service_account_info(creds_dict)
-            project_id = project_id or creds_dict.get('project_id')
-            db = firestore.Client(project=project_id, credentials=credentials)
-        elif project_id:
-            logger.info(f"Using default credentials with project: {project_id}")
-            db = firestore.Client(project=project_id)
-        else:
-            logger.info("Using default credentials")
-            db = firestore.Client()
-            project_id = db.project
+        logger.info("Using JSON credentials from environment")
+        creds_dict = json.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(creds_dict)
+        project_id = project_id or creds_dict.get('project_id')
+        db = firestore.Client(project=project_id, credentials=credentials)
 
         logger.info(f"Firestore client initialized successfully for project: {project_id}")
         return db, project_id
