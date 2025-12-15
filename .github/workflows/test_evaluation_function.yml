@@ -117,7 +117,7 @@ jobs:
           set -euo pipefail
           
           if [ ! -f report_data.json ]; then
-            echo "## ❌ Endpoint Validation Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "## ❌ Evaluation Function Report" >> "$GITHUB_STEP_SUMMARY"
             echo "**Status:** Failed - No report data generated" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
