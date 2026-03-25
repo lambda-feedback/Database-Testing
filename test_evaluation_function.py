@@ -445,6 +445,8 @@ def start_test(event, context):
 
         conn = get_db_connection()
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
+        conn.close()
+        conn = None
         results = test_endpoint(endpoint_to_test, data_for_test, request_delay)
 
         # Prepare summary for report_data.json
