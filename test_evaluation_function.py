@@ -70,7 +70,8 @@ def save_test_results_to_firestore(
         project_id: str,
         results_summary: Dict[str, Any],
         test_params: Dict[str, Any],
-        errors: List[Dict[str, Any]]
+        errors: List[Dict[str, Any]],
+        warnings: List[Dict[str, Any]]
 ) -> Tuple[str, str]:
     """Save test results to Firestore. Returns (doc_id, console_link)."""
     try:
@@ -85,6 +86,7 @@ def save_test_results_to_firestore(
             'pass_count': results_summary['pass_count'],
             'total_count': results_summary['total_count'],
             'number_of_errors': results_summary['number_of_errors'],
+            'number_of_warnings': results_summary.get('number_of_warnings', 0),
             'pass_rate': round(results_summary['pass_count'] / results_summary['total_count'] * 100, 2) if
             results_summary['total_count'] > 0 else 0,
             'status': 'completed'
@@ -120,6 +122,25 @@ def save_test_results_to_firestore(
 
             batch.commit()
             logger.info(f"Saved {len(errors)} error records to Firestore subcollection")
+
+        # Save warnings as subcollection if there are any
+        if warnings:
+            batch = db.batch()
+            warnings_ref = doc_ref.collection('warnings')
+
+            for i, warning in enumerate(warnings):
+                if i > 0 and i % 500 == 0:
+                    batch.commit()
+                    batch = db.batch()
+
+                warning_doc_ref = warnings_ref.document()
+                batch.set(warning_doc_ref, {
+                    'timestamp': firestore.SERVER_TIMESTAMP,
+                    **warning
+                })
+
+            batch.commit()
+            logger.info(f"Saved {len(warnings)} warning records to Firestore subcollection")
 
         return doc_id, console_link
 
@@ -169,7 +190,7 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
     sql_query_template = f"""
             SELECT
-               S.submission, S.answer, S.grade, RA."gradeParams"::json as grade_params
+               S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"::json as grade_params
             FROM "Submission" S
                 INNER JOIN public."ResponseArea" RA ON S."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
@@ -284,6 +305,24 @@ def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional
         }
 
 
+def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional[Dict[str, Any]]:
+    """Checks if API feedback matches the stored DB feedback. Returns a warning dict or None."""
+    result = response_data.get('result', {})
+    api_feedback = result.get('feedback')
+
+    if db_feedback is None or api_feedback is None:
+        return None
+
+    if api_feedback != db_feedback:
+        return {
+            "warning_type": "Feedback Mismatch",
+            "message": "API feedback does not match DB feedback.",
+            "db_feedback": db_feedback,
+            "api_feedback": api_feedback,
+        }
+    return None
+
+
 # --- Synchronous Execution Core ---
 
 def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
@@ -292,6 +331,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     total_requests = len(data_records)
     successful_requests = 0
     errors = []
+    warnings = []
     error_count = 0
 
     logger.info(f"Starting synchronous tests on endpoint")
@@ -318,6 +358,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
             error_count += 1
             execution_error['submission_id'] = submission_id
             execution_error['original_grade'] = record.get('grade')
+            execution_error['request_payload'] = payload
             errors.append(execution_error)
             continue
 
@@ -326,9 +367,16 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
         if validation_error:
             error_count += 1
             validation_error['submission_id'] = submission_id
+            validation_error['request_payload'] = payload
             errors.append(validation_error)
         else:
             successful_requests += 1
+
+        feedback_warning = _check_feedback(response_data, record.get('feedback'))
+        if feedback_warning:
+            feedback_warning['submission_id'] = submission_id
+            feedback_warning['request_payload'] = payload
+            warnings.append(feedback_warning)
 
         # Log progress every 10 requests
         if (i + 1) % 10 == 0:
@@ -338,7 +386,8 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
         "pass_count": successful_requests,
         "total_count": total_requests,
         "number_of_errors": error_count,
-        "list_of_errors": errors
+        "list_of_errors": errors,
+        "list_of_warnings": warnings,
     }
 
 
@@ -403,7 +452,8 @@ def start_test(event, context):
             "status": "success",
             "pass_count": results['pass_count'],
             "total_count": results['total_count'],
-            "number_of_errors": results['number_of_errors']
+            "number_of_errors": results['number_of_errors'],
+            "number_of_warnings": len(results['list_of_warnings']),
         }
 
         # Save to Firestore (required)
@@ -412,7 +462,8 @@ def start_test(event, context):
             project_id,
             results_summary,
             test_params,
-            results['list_of_errors']
+            results['list_of_errors'],
+            results['list_of_warnings'],
         )
 
         if not firestore_doc_id:
