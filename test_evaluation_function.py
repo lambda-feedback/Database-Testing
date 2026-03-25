@@ -190,7 +190,7 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
     sql_query_template = f"""
             SELECT
-               S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"::json as grade_params
+               S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"::json as grade_params
             FROM "Submission" S
                 INNER JOIN public."ResponseArea" RA ON S."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
