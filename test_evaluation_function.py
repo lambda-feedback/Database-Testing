@@ -190,7 +190,7 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
     sql_query_template = f"""
             SELECT
-               S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"::json as grade_params
+               S.id as submission_id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"::json as grade_params
             FROM "Submission" S
                 INNER JOIN public."ResponseArea" RA ON S."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
@@ -338,7 +338,7 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     logger.info(f"Request delay: {request_delay} seconds between requests")
 
     for i, record in enumerate(data_records):
-        submission_id = record.get('id')
+        submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
 
         if error_count >= MAX_ERROR_THRESHOLD:
             logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
