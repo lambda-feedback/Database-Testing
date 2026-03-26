@@ -174,7 +174,7 @@ def get_db_connection() -> Connection:
 def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str) -> List[
     Dict[str, Any]]:
     """Fetches data using the provided complex query with SQLAlchemy."""
-    limit = max(1, min(sql_limit, DEFAULT_SQL_LIMIT))
+    limit = max(1, sql_limit)
 
     where_clauses = ["EF.name = :name_param"]
     params = {
