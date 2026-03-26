@@ -3,19 +3,20 @@ import os
 import json
 import logging
 import sys
-import time
+import asyncio
+import aiohttp
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
-import requests
 from google.cloud import firestore
 from google.oauth2 import service_account
 import base64
 
 # --- Configuration ---
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-DEFAULT_REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '2.0'))
+DEFAULT_REQUEST_DELAY = float(os.environ.get('REQUEST_DELAY', '0.0'))
+DEFAULT_MAX_CONCURRENCY = int(os.environ.get('MAX_CONCURRENCY', '5'))
 GCP_PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 
 logger = logging.getLogger()
@@ -82,6 +83,7 @@ def save_test_results_to_firestore(
             'eval_function_name': test_params.get('eval_function_name'),
             'sql_limit': test_params.get('sql_limit'),
             'request_delay': test_params.get('request_delay'),
+            'max_concurrency': test_params.get('max_concurrency'),
             'grade_params_json': test_params.get('grade_params_json', ''),
             'pass_count': results_summary['pass_count'],
             'total_count': results_summary['total_count'],
@@ -241,34 +243,33 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _execute_request(endpoint_path: str, payload: Dict[str, Any]) -> Tuple[
+async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, payload: Dict[str, Any]) -> Tuple[
     Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Executes the POST request. Returns (response_data, error_details)."""
     try:
-        response = requests.post(
+        async with session.post(
             endpoint_path,
             json=payload,
-            timeout=10,
-        )
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as response:
+            if response.status != 200:
+                return None, {
+                    "error_type": "HTTP Error",
+                    "status_code": response.status,
+                    "message": f"Received status code {response.status}.",
+                    "response_text": (await response.text())[:200]
+                }
 
-        if response.status_code != 200:
-            return None, {
-                "error_type": "HTTP Error",
-                "status_code": response.status_code,
-                "message": f"Received status code {response.status_code}.",
-                "response_text": response.text[:200]
-            }
+            try:
+                return await response.json(content_type=None), None
+            except Exception:
+                return None, {
+                    "error_type": "JSON Decode Error",
+                    "message": "API response could not be parsed as JSON.",
+                    "response_text": (await response.text())[:200]
+                }
 
-        try:
-            return response.json(), None
-        except json.JSONDecodeError:
-            return None, {
-                "error_type": "JSON Decode Error",
-                "message": "API response could not be parsed as JSON.",
-                "response_text": response.text[:200]
-            }
-
-    except requests.exceptions.RequestException as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         return None, {
             "error_type": "ConnectionError",
             "message": str(e)
@@ -325,66 +326,91 @@ def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional
 
 # --- Synchronous Execution Core ---
 
-def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
-                  request_delay: float = DEFAULT_REQUEST_DELAY) -> Dict[str, Any]:
-    """Main function to test the endpoint, processing requests sequentially."""
-    total_requests = len(data_records)
+async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
+                        request_delay: float = DEFAULT_REQUEST_DELAY,
+                        max_concurrency: int = DEFAULT_MAX_CONCURRENCY) -> Dict[str, Any]:
+    """Main function to test the endpoint, processing requests concurrently."""
+    total_records = len(data_records)
     successful_requests = 0
     errors = []
     warnings = []
     error_count = 0
+    completed_count = 0
 
-    logger.info(f"Starting synchronous tests on endpoint")
-    logger.info(f"Request delay: {request_delay} seconds between requests")
+    semaphore = asyncio.Semaphore(max_concurrency)
+    lock = asyncio.Lock()
+    stop_event = asyncio.Event()
 
-    for i, record in enumerate(data_records):
-        submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
+    logger.info(f"Starting tests on endpoint with max_concurrency={max_concurrency}, request_delay={request_delay}s")
 
-        if error_count >= MAX_ERROR_THRESHOLD:
-            logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
-            break
+    async def worker(i: int, record: Dict[str, Any]) -> None:
+        nonlocal error_count, completed_count, successful_requests
 
-        # Add delay before request (except for the first one)
-        if i > 0 and request_delay > 0:
-            time.sleep(request_delay)
-            logger.debug(f"Waited {request_delay}s before request {i + 1}/{total_requests}")
+        if stop_event.is_set():
+            return
 
-        payload = _prepare_payload(record)
-        response_data, execution_error = _execute_request(base_endpoint, payload)
+        async with semaphore:
+            if stop_event.is_set():
+                return
 
-        logging.debug(f"RESPONSE: {response_data}")
+            submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
+            payload = _prepare_payload(record)
+            response_data, execution_error = await _execute_request(session, base_endpoint, payload)
 
-        if execution_error:
-            error_count += 1
-            execution_error['submission_id'] = submission_id
-            execution_error['original_grade'] = record.get('grade')
-            execution_error['request_payload'] = payload
-            errors.append(execution_error)
-            continue
+            logging.debug(f"RESPONSE: {response_data}")
 
-        validation_error = _validate_response(response_data, record.get('grade'))
+            async with lock:
+                if execution_error:
+                    error_count += 1
+                    execution_error['submission_id'] = submission_id
+                    execution_error['original_grade'] = record.get('grade')
+                    execution_error['request_payload'] = payload
+                    errors.append(execution_error)
+                    if error_count >= MAX_ERROR_THRESHOLD:
+                        logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                        stop_event.set()
+                    completed_count += 1
+                    if completed_count % 10 == 0:
+                        logger.info(f"Progress: {completed_count}/{total_records} requests completed")
+                    return
 
-        if validation_error:
-            error_count += 1
-            validation_error['submission_id'] = submission_id
-            validation_error['request_payload'] = payload
-            errors.append(validation_error)
-        else:
-            successful_requests += 1
+                validation_error = _validate_response(response_data, record.get('grade'))
 
-        feedback_warning = _check_feedback(response_data, record.get('feedback'))
-        if feedback_warning:
-            feedback_warning['submission_id'] = submission_id
-            feedback_warning['request_payload'] = payload
-            warnings.append(feedback_warning)
+                if validation_error:
+                    error_count += 1
+                    validation_error['submission_id'] = submission_id
+                    validation_error['request_payload'] = payload
+                    errors.append(validation_error)
+                    if error_count >= MAX_ERROR_THRESHOLD:
+                        logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                        stop_event.set()
+                else:
+                    successful_requests += 1
 
-        # Log progress every 10 requests
-        if (i + 1) % 10 == 0:
-            logger.info(f"Progress: {i + 1}/{total_requests} requests completed")
+                feedback_warning = _check_feedback(response_data, record.get('feedback'))
+                if feedback_warning:
+                    feedback_warning['submission_id'] = submission_id
+                    feedback_warning['request_payload'] = payload
+                    warnings.append(feedback_warning)
+
+                completed_count += 1
+                if completed_count % 10 == 0:
+                    logger.info(f"Progress: {completed_count}/{total_records} requests completed")
+
+    connector = aiohttp.TCPConnector(limit=max_concurrency + 2)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = []
+        for i, record in enumerate(data_records):
+            if stop_event.is_set():
+                break
+            tasks.append(asyncio.create_task(worker(i, record)))
+            if request_delay > 0 and i < total_records - 1:
+                await asyncio.sleep(request_delay)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     return {
         "pass_count": successful_requests,
-        "total_count": total_requests,
+        "total_count": total_records,
         "number_of_errors": error_count,
         "list_of_errors": errors,
         "list_of_warnings": warnings,
@@ -421,6 +447,7 @@ def start_test(event, context):
         eval_function_name = payload.get('eval_function_name')
         grade_params_json = payload.get('grade_params_json')
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
+        max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
 
         if not endpoint_to_test or not eval_function_name:
             missing_fields = []
@@ -440,14 +467,15 @@ def start_test(event, context):
             'eval_function_name': eval_function_name,
             'sql_limit': sql_limit,
             'grade_params_json': grade_params_json,
-            'request_delay': request_delay
+            'request_delay': request_delay,
+            'max_concurrency': max_concurrency,
         }
 
         conn = get_db_connection()
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
         conn.close()
         conn = None
-        results = test_endpoint(endpoint_to_test, data_for_test, request_delay)
+        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency))
 
         # Prepare summary for report_data.json
         results_summary = {
@@ -517,7 +545,9 @@ if __name__ == "__main__":
     parser.add_argument("--sql_limit", type=int, default=100, help="Max number of records to fetch")
     parser.add_argument("--grade_params_json", default="", help="Grade parameters as JSON string")
     parser.add_argument("--request_delay", type=float, default=DEFAULT_REQUEST_DELAY,
-                        help="Delay in seconds between requests (default: 2.0)")
+                        help="Delay in seconds between dispatching each request (default: 0.0)")
+    parser.add_argument("--max_concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY,
+                        help="Max concurrent in-flight requests (default: 5)")
 
     args = parser.parse_args()
 
@@ -527,6 +557,7 @@ if __name__ == "__main__":
         "sql_limit": args.sql_limit,
         "grade_params_json": args.grade_params_json,
         "request_delay": args.request_delay,
+        "max_concurrency": args.max_concurrency,
     }
 
     print("-" * 50)
