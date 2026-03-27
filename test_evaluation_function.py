@@ -194,13 +194,14 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
     sql_query_template = f"""
             SELECT
-                S.id as submission_id, S.submission, S.answer, S.grade, S.feedback,
+                S.id as submission_id, S.submission, S.answer, S.grade::int::boolean, S.feedback,
                 RA."gradeParams"::json as grade_params,
                 json_agg(
                     json_build_object(
                         'answer',   RAC.answer,
                         'params',   RAC.params,
-                        'feedback', RAC.feedback
+                        'feedback', RAC.feedback,
+                        'is_correct',     RAC.mark::int::boolean
                     )
                 ) AS cases
             FROM "Submission" S
