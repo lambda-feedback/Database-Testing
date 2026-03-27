@@ -12,6 +12,16 @@ on:
         required: false
         type: string
         default: 1000
+      request_delay:
+        description: 'Delay (seconds) between dispatching requests'
+        required: false
+        type: string
+        default: '0'
+      max_concurrency:
+        description: 'Max concurrent requests (lower for GPT-backed functions)'
+        required: false
+        type: string
+        default: '5'
     secrets:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
@@ -79,7 +89,9 @@ jobs:
             --endpoint "${{ secrets.TEST_API_ENDPOINT }}" \
             --eval_function_name "${{ inputs.eval_function }}" \
             --sql_limit "${{ inputs.sql_limit }}" \
-            --grade_params_json ""; then
+            --grade_params_json "" \
+            --request_delay "${{ inputs.request_delay }}" \
+            --max_concurrency "${{ inputs.max_concurrency }}"; then
             echo "::error::Python script failed with non-zero exit code"
             exit 1
           fi
