@@ -2,6 +2,7 @@ import argparse
 import os
 import json
 import logging
+import random
 import sys
 import asyncio
 import aiohttp
@@ -85,6 +86,7 @@ def save_test_results_to_firestore(
             'request_delay': test_params.get('request_delay'),
             'max_concurrency': test_params.get('max_concurrency'),
             'grade_params_json': test_params.get('grade_params_json', ''),
+            'seed': test_params.get('seed'),
             'pass_count': results_summary['pass_count'],
             'total_count': results_summary['total_count'],
             'number_of_errors': results_summary['number_of_errors'],
@@ -173,7 +175,7 @@ def get_db_connection() -> Connection:
         raise
 
 
-def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str) -> List[
+def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str, seed: float) -> List[
     Dict[str, Any]]:
     """Fetches data using the provided complex query with SQLAlchemy."""
     limit = max(1, sql_limit)
@@ -208,11 +210,12 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
             WHERE
                 {where_sql}
             GROUP BY S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"
+            ORDER BY RANDOM()
             LIMIT :limit_param;
         """
 
-    data_records = []
     try:
+        conn.execute(text("SELECT setseed(:seed_param)"), {"seed_param": seed})
         result = conn.execute(text(sql_query_template), query_params)
         data_records = [dict(row) for row in result.mappings()]
 
@@ -453,6 +456,12 @@ def start_test(event, context):
         grade_params_json = payload.get('grade_params_json')
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
+        seed = payload.get('seed')
+        if seed is None:
+            seed = random.uniform(-1.0, 1.0)
+        else:
+            seed = float(seed)
+        logger.info(f"Using random seed: {seed}")
 
         if not endpoint_to_test or not eval_function_name:
             missing_fields = []
@@ -474,10 +483,11 @@ def start_test(event, context):
             'grade_params_json': grade_params_json,
             'request_delay': request_delay,
             'max_concurrency': max_concurrency,
+            'seed': seed,
         }
 
         conn = get_db_connection()
-        data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json)
+        data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json, seed)
         conn.close()
         conn = None
         results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency))
@@ -489,6 +499,7 @@ def start_test(event, context):
             "total_count": results['total_count'],
             "number_of_errors": results['number_of_errors'],
             "number_of_warnings": len(results['list_of_warnings']),
+            "seed": seed,
         }
 
         # Save to Firestore (required)
@@ -553,6 +564,8 @@ if __name__ == "__main__":
                         help="Delay in seconds between dispatching each request (default: 0.0)")
     parser.add_argument("--max_concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY,
                         help="Max concurrent in-flight requests (default: 5)")
+    parser.add_argument("--seed", type=float, default=None,
+                        help="Random seed for reproducible sampling (float in [-1.0, 1.0]). Auto-generated if omitted.")
 
     args = parser.parse_args()
 
@@ -563,6 +576,7 @@ if __name__ == "__main__":
         "grade_params_json": args.grade_params_json,
         "request_delay": args.request_delay,
         "max_concurrency": args.max_concurrency,
+        "seed": args.seed,
     }
 
     print("-" * 50)

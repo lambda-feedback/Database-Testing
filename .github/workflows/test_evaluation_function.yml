@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: '5'
+      seed:
+        description: 'Random seed for reproducible sampling (float in [-1.0, 1.0]). Leave blank to auto-generate.'
+        required: false
+        type: string
+        default: ''
     secrets:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
@@ -85,13 +90,19 @@ jobs:
           set -euo pipefail
 
           # Run the argparse-enabled script and capture exit code
+          SEED_ARG=""
+          if [ -n "${{ inputs.seed }}" ]; then
+            SEED_ARG="--seed ${{ inputs.seed }}"
+          fi
+
           if ! python3 test_evaluation_function.py \
             --endpoint "${{ secrets.TEST_API_ENDPOINT }}" \
             --eval_function_name "${{ inputs.eval_function }}" \
             --sql_limit "${{ inputs.sql_limit }}" \
             --grade_params_json "" \
             --request_delay "${{ inputs.request_delay }}" \
-            --max_concurrency "${{ inputs.max_concurrency }}"; then
+            --max_concurrency "${{ inputs.max_concurrency }}" \
+            $SEED_ARG; then
             echo "::error::Python script failed with non-zero exit code"
             exit 1
           fi
@@ -155,6 +166,7 @@ jobs:
           ERRORS="$(echo "$REPORT_DATA" | jq -r '.number_of_errors // 0')"
           FIRESTORE_LINK="$(echo "$REPORT_DATA" | jq -r '.firestore_link // ""')"
           FIRESTORE_DOC_ID="$(echo "$REPORT_DATA" | jq -r '.firestore_doc_id // ""')"
+          SEED="$(echo "$REPORT_DATA" | jq -r '.seed // "N/A"')"
           
           if [ "$TOTAL" -gt 0 ]; then
             PASS_RATE="$(echo "scale=2; $PASSES / $TOTAL * 100" | bc -l)"
@@ -179,6 +191,7 @@ jobs:
             echo "| **Passed** | ${PASSES} |"
             echo "| **Failed** | **${ERRORS}** |"
             echo "| **Pass Rate** | ${PASS_RATE}% |"
+            echo "| **Seed** | \`${SEED}\` |"
             echo "---"
             
             # Add Firestore link if available
