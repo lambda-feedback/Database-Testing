@@ -177,41 +177,41 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     limit = max(1, sql_limit)
 
     where_clauses = ["EF.name = :name_param"]
-    params = {
+    query_params = {
         "name_param": eval_function_name,
         "limit_param": limit
     }
 
     if grade_params_json:
         where_clauses.append("RA.\"gradeParams\"::jsonb = (:params_param)::jsonb")
-        params["params_param"] = grade_params_json
+        query_params["params_param"] = grade_params_json
 
     where_sql = " AND ".join(where_clauses)
 
     sql_query_template = f"""
             SELECT
-               S.id as submission_id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"::json as grade_params
+                S.id as submission_id, S.submission, S.answer, S.grade, S.feedback,
+                RA."gradeParams"::json as grade_params,
+                json_agg(
+                    json_build_object(
+                        'answer',   RAC.answer,
+                        'params',   RAC.params,
+                        'feedback', RAC.feedback
+                    )
+                ) AS cases
             FROM "Submission" S
-                INNER JOIN public."ResponseArea" RA ON S."responseAreaId" = RA.id
+                INNER JOIN "ResponseArea" RA ON S."responseAreaId" = RA.id
+                INNER JOIN "ResponseAreaCase" RAC ON RAC."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
-            WHERE 
+            WHERE
                 {where_sql}
+            GROUP BY S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"
             LIMIT :limit_param;
         """
 
     data_records = []
     try:
-        sql_statement = text(sql_query_template)
-
-        result = conn.execute(
-            sql_statement,
-            {
-                "name_param": eval_function_name,
-                "params_param": grade_params_json,
-                "limit_param": limit
-            }
-        )
-
+        result = conn.execute(text(sql_query_template), query_params)
         data_records = [dict(row) for row in result.mappings()]
 
     except Exception as e:
@@ -226,7 +226,7 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
 def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
     """Constructs the JSON payload for the API request from the DB record."""
-    grade_params = record.get('grade_params', {})
+    grade_params = record.get('grade_params') or {}
     response = record.get('submission')
     answer = record.get('answer').replace('"', '')
 
@@ -236,7 +236,10 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
     payload = {
         "response": response,
         "answer": answer,
-        "params": grade_params
+        "params": {
+            **grade_params,
+            "cases": record.get('cases', []),
+        }
     }
     return payload
 
@@ -350,6 +353,8 @@ def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
             logger.debug(f"Waited {request_delay}s before request {i + 1}/{total_requests}")
 
         payload = _prepare_payload(record)
+        logging.debug(f"REQUEST: {payload}")
+
         response_data, execution_error = _execute_request(base_endpoint, payload)
 
         logging.debug(f"RESPONSE: {response_data}")
