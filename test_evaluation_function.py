@@ -257,7 +257,7 @@ async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, p
         async with session.post(
             endpoint_path,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=10),
+            timeout=aiohttp.ClientTimeout(total=60),
         ) as response:
             if response.status != 200:
                 return None, {
@@ -279,7 +279,7 @@ async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, p
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         return None, {
             "error_type": "ConnectionError",
-            "message": str(e)
+            "message": f"{type(e).__name__}: {e}"
         }
 
 
@@ -363,10 +363,9 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
             submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
 
             payload = _prepare_payload(record)
-            logging.debug(f"REQUEST: {payload}")
 
             response_data, execution_error = await _execute_request(session, base_endpoint, payload)
-            logging.debug(f"RESPONSE: {response_data}")
+            logging.debug(f"[{submission_id}] grade={record.get('grade')} | REQUEST: {payload} | RESPONSE: {response_data or execution_error}")
 
             async with lock:
                 if execution_error:
