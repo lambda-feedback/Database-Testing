@@ -73,6 +73,7 @@ def save_test_results_to_firestore(
         results_summary: Dict[str, Any],
         test_params: Dict[str, Any],
         errors: List[Dict[str, Any]],
+        network_errors: List[Dict[str, Any]],
         warnings: List[Dict[str, Any]]
 ) -> Tuple[str, str]:
     """Save test results to Firestore. Returns (doc_id, console_link)."""
@@ -127,6 +128,25 @@ def save_test_results_to_firestore(
             batch.commit()
             logger.info(f"Saved {len(errors)} error records to Firestore subcollection")
 
+        # Save network errors as subcollection if there are any
+        if network_errors:
+            batch = db.batch()
+            network_errors_ref = doc_ref.collection('network_errors')
+
+            for i, network_error in enumerate(network_errors):
+                if i > 0 and i % 500 == 0:
+                    batch.commit()
+                    batch = db.batch()
+
+                network_error_doc_ref = network_errors_ref.document()
+                batch.set(network_error_doc_ref, {
+                    'timestamp': firestore.SERVER_TIMESTAMP,
+                    **network_error
+                })
+
+            batch.commit()
+            logger.info(f"Saved {len(network_errors)} network error records to Firestore subcollection")
+
         # Save warnings as subcollection if there are any
         if warnings:
             batch = db.batch()
@@ -180,10 +200,13 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     """Fetches data using the provided complex query with SQLAlchemy."""
     limit = max(1, sql_limit)
 
-    where_clauses = ["EF.name = :name_param"]
+    since_date = datetime(datetime.now().year - 1, 6, 1)
+
+    where_clauses = ["EF.name = :name_param", "S.\"createdAt\" >= :since_date_param"]
     query_params = {
         "name_param": eval_function_name,
-        "limit_param": limit
+        "limit_param": limit,
+        "since_date_param": since_date,
     }
 
     if grade_params_json:
@@ -286,6 +309,16 @@ async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, p
 def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional[Dict[str, Any]]:
     """Compares the API's 'is_correct' result against the historical database grade."""
     result = response_data.get('result')
+
+    if result is None:
+        api_error = response_data.get('error', {})
+        return {
+            "error_type": "Grader Exception",
+            "message": api_error.get('message', 'API returned no result.'),
+            "detail": api_error.get('detail', ''),
+            "original_grade": db_grade,
+        }
+
     api_is_correct = result.get('is_correct')
 
     expected_is_correct: Optional[bool]
@@ -340,8 +373,10 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     total_records = len(data_records)
     successful_requests = 0
     errors = []
+    network_errors = []
     warnings = []
-    error_count = 0
+    validation_error_count = 0
+    network_error_count = 0
     completed_count = 0
 
     semaphore = asyncio.Semaphore(max_concurrency)
@@ -351,7 +386,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     logger.info(f"Starting tests on endpoint with max_concurrency={max_concurrency}, request_delay={request_delay}s")
 
     async def worker(i: int, record: Dict[str, Any]) -> None:
-        nonlocal error_count, completed_count, successful_requests
+        nonlocal validation_error_count, network_error_count, completed_count, successful_requests
 
         if stop_event.is_set():
             return
@@ -369,12 +404,12 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
 
             async with lock:
                 if execution_error:
-                    error_count += 1
+                    network_error_count += 1
                     execution_error['submission_id'] = submission_id
                     execution_error['original_grade'] = record.get('grade')
                     execution_error['request_payload'] = payload
-                    errors.append(execution_error)
-                    if error_count >= MAX_ERROR_THRESHOLD:
+                    network_errors.append(execution_error)
+                    if network_error_count >= MAX_ERROR_THRESHOLD:
                         logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
                         stop_event.set()
                     completed_count += 1
@@ -385,11 +420,11 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 validation_error = _validate_response(response_data, record.get('grade'))
 
                 if validation_error:
-                    error_count += 1
+                    validation_error_count += 1
                     validation_error['submission_id'] = submission_id
                     validation_error['request_payload'] = payload
                     errors.append(validation_error)
-                    if error_count >= MAX_ERROR_THRESHOLD:
+                    if validation_error_count >= MAX_ERROR_THRESHOLD:
                         logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
                         stop_event.set()
                 else:
@@ -419,8 +454,10 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     return {
         "pass_count": successful_requests,
         "total_count": total_records,
-        "number_of_errors": error_count,
+        "number_of_errors": validation_error_count,
+        "number_of_network_errors": network_error_count,
         "list_of_errors": errors,
+        "list_of_network_errors": network_errors,
         "list_of_warnings": warnings,
     }
 
@@ -498,6 +535,7 @@ def start_test(event, context):
             "pass_count": results['pass_count'],
             "total_count": results['total_count'],
             "number_of_errors": results['number_of_errors'],
+            "number_of_network_errors": results['number_of_network_errors'],
             "number_of_warnings": len(results['list_of_warnings']),
             "seed": seed,
         }
@@ -509,6 +547,7 @@ def start_test(event, context):
             results_summary,
             test_params,
             results['list_of_errors'],
+            results['list_of_network_errors'],
             results['list_of_warnings'],
         )
 
