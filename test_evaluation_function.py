@@ -215,25 +215,28 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
     where_sql = " AND ".join(where_clauses)
 
+    debug_column = ', S."rawResponse"::json as raw_response' if LOG_LEVEL == 'DEBUG' else ''
+
     sql_query_template = f"""
             SELECT
-                S.id as submission_id, S.submission, S.answer, S.grade::int::boolean, S.feedback,
+                S.id as submission_id, S.submission, S.answer::jsonb , S.grade::int::boolean, S.feedback,
                 RA."gradeParams"::json as grade_params,
                 json_agg(
                     json_build_object(
-                        'answer',   RAC.answer,
+                        'answer',   RAC.answer::jsonb,
                         'params',   RAC.params,
                         'feedback', RAC.feedback,
                         'is_correct',     RAC.mark::int::boolean
                     )
                 ) AS cases
+                {debug_column}
             FROM "Submission" S
                 INNER JOIN "ResponseArea" RA ON S."responseAreaId" = RA.id
                 INNER JOIN "ResponseAreaCase" RAC ON RAC."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
             WHERE
                 {where_sql}
-            GROUP BY S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"
+            GROUP BY S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"{', S."rawResponse"' if LOG_LEVEL == 'DEBUG' else ''}
             ORDER BY RANDOM()
             LIMIT :limit_param;
         """
@@ -262,12 +265,17 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
     logging.debug(f"Response Type: {response} -  {type(response)}")
     logging.debug(f"Answer Type: {answer} -  {type(answer)}")
 
+    cases = [
+        {**case, "params": case["params"] if case.get("params") is not None else {}}
+        for case in record.get('cases', [])
+    ]
+
     payload = {
         "response": response,
         "answer": answer,
         "params": {
             **grade_params,
-            "cases": record.get('cases', []),
+            "cases": cases,
         }
     }
     return payload
