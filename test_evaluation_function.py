@@ -219,24 +219,30 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
 
     sql_query_template = f"""
             SELECT
-                S.id as submission_id, S.submission, S.answer::jsonb , S.grade::int::boolean, S.feedback,
+                S.id as submission_id, S.submission, S.answer::jsonb, S.grade::int::boolean, S.feedback,
                 RA."gradeParams"::json as grade_params,
-                json_agg(
-                    json_build_object(
-                        'answer',   RAC.answer::jsonb,
-                        'params',   RAC.params,
-                        'feedback', RAC.feedback,
-                        'is_correct',     RAC.mark::int::boolean
-                    )
-                ) AS cases
+                (
+                    SELECT json_agg(json_build_object(
+                        'answer',     RAC.answer::jsonb,
+                        'params',     RAC.params,
+                        'feedback',   RAC.feedback,
+                        'mark',       RAC.mark::int
+                    ))
+                    FROM "ResponseAreaCase" RAC
+                    WHERE RAC."responseAreaId" = RA.id
+                ) AS cases,
+                json_object_agg(ISYM.code, json_build_object(
+                    'latex',   ISYM.symbol,
+                    'aliases', ISYM.aliases
+                )) FILTER (WHERE ISYM.code IS NOT NULL) AS symbols
                 {debug_column}
             FROM "Submission" S
                 INNER JOIN "ResponseArea" RA ON S."responseAreaId" = RA.id
-                INNER JOIN "ResponseAreaCase" RAC ON RAC."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
+                LEFT JOIN "InputSymbol" ISYM ON ISYM."responseAreaId" = RA.id
             WHERE
                 {where_sql}
-            GROUP BY S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams"{', S."rawResponse"' if LOG_LEVEL == 'DEBUG' else ''}
+            GROUP BY S.id, S.submission, S.answer, S.grade, S.feedback, RA."gradeParams", RA.id{', S."rawResponse"' if LOG_LEVEL == 'DEBUG' else ''}
             ORDER BY RANDOM()
             LIMIT :limit_param;
         """
@@ -270,11 +276,14 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
         for case in record.get('cases', [])
     ]
 
+    symbols = record.get('symbols') or {}
+
     payload = {
         "response": response,
         "answer": answer,
         "params": {
             **grade_params,
+            "symbols": symbols,
             "cases": cases,
         }
     }
@@ -462,6 +471,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     return {
         "pass_count": successful_requests,
         "total_count": total_records,
+        "tested_count": completed_count,
         "number_of_errors": validation_error_count,
         "number_of_network_errors": network_error_count,
         "list_of_errors": errors,
@@ -542,6 +552,7 @@ def start_test(event, context):
             "status": "success",
             "pass_count": results['pass_count'],
             "total_count": results['total_count'],
+            "tested_count": results['tested_count'],
             "number_of_errors": results['number_of_errors'],
             "number_of_network_errors": results['number_of_network_errors'],
             "number_of_warnings": len(results['list_of_warnings']),
