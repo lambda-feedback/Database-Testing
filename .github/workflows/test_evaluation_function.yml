@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: ''
+      pass_threshold:
+        description: 'Minimum pass rate % (0-100) required for the test to succeed. Default 100 means any error fails the run.'
+        required: false
+        type: string
+        default: '100'
     secrets:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
@@ -123,24 +128,31 @@ jobs:
             exit 1
           fi
 
-          # Check for specific validation errors to log to console
-          ERROR_COUNT="$(echo "$REPORT_DATA" | jq -r '.number_of_errors // 0')"
-          
-          if [ "${ERROR_COUNT}" -gt 0 ]; then
-             echo "::error file=test_evaluation_function.py::Test completed with ${ERROR_COUNT} errors."
-             # Do not exit 1 here if you want the Summary to display the failure stats nicely. 
-             # Only exit 1 if you want the pipeline to stop immediately (usually preferred for tests).
-             exit 1 
+          # Check pass rate against configurable threshold
+          PASSES="$(echo "$REPORT_DATA" | jq -r '.pass_count // 0')"
+          TESTED="$(echo "$REPORT_DATA" | jq -r '.tested_count // 0')"
+          ERRORS="$(echo "$REPORT_DATA" | jq -r '.number_of_errors // 0')"
+          THRESHOLD="${{ inputs.pass_threshold }}"
+
+          if [ "$TESTED" -gt 0 ]; then
+            PASS_RATE="$(echo "scale=4; $PASSES / $TESTED * 100" | bc -l)"
+          else
+            PASS_RATE="0"
           fi
 
-      - name: 📊 Create Job Summary Report
+          if [ "$(echo "$PASS_RATE < $THRESHOLD" | bc -l)" = "1" ]; then
+            echo "::error file=test_evaluation_function.py::Pass rate ${PASS_RATE}% is below the ${THRESHOLD}% threshold. ${ERRORS} test(s) failed."
+            exit 1
+          fi
+
+      - name: Create Job Summary Report
         if: always() # Run even if the previous step failed/found errors
         working-directory: ./Database-Testing
         run: |
           set -euo pipefail
           
           if [ ! -f report_data.json ]; then
-            echo "## ❌ Evaluation Function Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "## Evaluation Function Report" >> "$GITHUB_STEP_SUMMARY"
             echo "**Status:** Failed - No report data generated" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -152,7 +164,7 @@ jobs:
           if [ "$STATUS" = "failed" ]; then
             ERROR_MSG="$(echo "$REPORT_DATA" | jq -r '.error // "Unknown error"')"
             {
-              echo "## ❌ Endpoint Validation Report"
+              echo "## Endpoint Validation Report"
               echo "---"
               echo "**Status:** Failed"
               echo "**Error:** ${ERROR_MSG}"
@@ -168,6 +180,7 @@ jobs:
           FIRESTORE_LINK="$(echo "$REPORT_DATA" | jq -r '.firestore_link // ""')"
           FIRESTORE_DOC_ID="$(echo "$REPORT_DATA" | jq -r '.firestore_doc_id // ""')"
           SEED="$(echo "$REPORT_DATA" | jq -r '.seed // "N/A"')"
+          THRESHOLD="${{ inputs.pass_threshold }}"
 
           if [ "$TESTED" -gt 0 ]; then
             PASS_RATE="$(echo "scale=2; $PASSES / $TESTED * 100" | bc -l)"
@@ -175,9 +188,9 @@ jobs:
             PASS_RATE="0"
           fi
 
-          STATUS_EMOJI="✅"
-          if [ "$ERRORS" -gt 0 ]; then
-              STATUS_EMOJI="❌"
+          STATUS_EMOJI="[PASS]"
+          if [ "$(echo "$PASS_RATE < $THRESHOLD" | bc -l)" = "1" ]; then
+              STATUS_EMOJI="[FAIL]"
           fi
 
           {
@@ -193,15 +206,16 @@ jobs:
             echo "| **Passed** | ${PASSES} |"
             echo "| **Failed** | **${ERRORS}** |"
             echo "| **Pass Rate** | ${PASS_RATE}% |"
+            echo "| **Pass Threshold** | ${THRESHOLD}% |"
             echo "| **Seed** | \`${SEED}\` |"
             echo "---"
             
             # Add Firestore link if available
             if [ -n "$FIRESTORE_LINK" ]; then
               echo ""
-              echo "### 📋 Detailed Results"
+              echo "### Detailed Results"
               echo ""
-              echo "🔗 **[View full results in Firestore](${FIRESTORE_LINK})**"
+              echo "**[View full results in Firestore](${FIRESTORE_LINK})**"
               echo ""
               echo "<details>"
               echo "<summary>Firestore Document Details</summary>"
