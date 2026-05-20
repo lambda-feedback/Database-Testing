@@ -78,7 +78,8 @@ def start_test(event, context):
             "tested_count": results['tested_count'],
             "number_of_errors": results['number_of_errors'],
             "number_of_network_errors": results['number_of_network_errors'],
-            "number_of_warnings": len(results['list_of_warnings']),
+            "number_of_feedback_warnings": len(results['list_of_feedback_warnings']),
+            "number_of_parsing_warnings": len(results['list_of_parsing_warnings']),
             "seed": seed,
         }
 
@@ -89,7 +90,8 @@ def start_test(event, context):
             test_params,
             results['list_of_errors'],
             results['list_of_network_errors'],
-            results['list_of_warnings'],
+            results['list_of_feedback_warnings'],
+            results['list_of_parsing_warnings'],
         )
 
         if not firestore_doc_id:

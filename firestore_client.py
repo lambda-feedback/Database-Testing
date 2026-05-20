@@ -42,7 +42,8 @@ def save_test_results_to_firestore(
         test_params: Dict[str, Any],
         errors: List[Dict[str, Any]],
         network_errors: List[Dict[str, Any]],
-        warnings: List[Dict[str, Any]]
+        feedback_warnings: List[Dict[str, Any]],
+        parsing_warnings: List[Dict[str, Any]]
 ) -> Tuple[str, str]:
     """Save test results to Firestore. Returns (doc_id, console_link)."""
     try:
@@ -58,7 +59,8 @@ def save_test_results_to_firestore(
             'pass_count': results_summary['pass_count'],
             'total_count': results_summary['total_count'],
             'number_of_errors': results_summary['number_of_errors'],
-            'number_of_warnings': results_summary.get('number_of_warnings', 0),
+            'number_of_feedback_warnings': results_summary.get('number_of_feedback_warnings', 0),
+            'number_of_parsing_warnings': results_summary.get('number_of_parsing_warnings', 0),
             'pass_rate': round(results_summary['pass_count'] / results_summary['total_count'] * 100, 2) if
             results_summary['total_count'] > 0 else 0,
             'status': 'completed'
@@ -88,7 +90,8 @@ def save_test_results_to_firestore(
 
         _write_subcollection('errors', errors)
         _write_subcollection('network_errors', network_errors)
-        _write_subcollection('warnings', warnings)
+        _write_subcollection('feedback_warnings', feedback_warnings)
+        _write_subcollection('parsing_warnings', parsing_warnings)
 
         return doc_id, console_link
 
