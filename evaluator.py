@@ -4,7 +4,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 import aiohttp
 
-from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, MAX_ERROR_THRESHOLD
+from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, MAX_ERROR_THRESHOLD, MAX_RETRY_ATTEMPTS
 
 
 def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -34,36 +34,51 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Executes the POST request. Returns (response_data, error_details)."""
-    try:
-        async with session.post(
-            endpoint_path,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as response:
-            if response.status != 200:
-                return None, {
-                    "error_type": "HTTP Error",
-                    "status_code": response.status,
-                    "message": f"Received status code {response.status}.",
-                    "response_text": (await response.text())[:200]
-                }
+async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, payload: Dict[str, Any], retry_base_delay: float = 0.0) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Executes the POST request with exponential backoff on transient network errors.
+    Returns (response_data, error_details).
+    """
+    last_error: Optional[Exception] = None
 
-            try:
-                return await response.json(content_type=None), None
-            except Exception:
-                return None, {
-                    "error_type": "JSON Decode Error",
-                    "message": "API response could not be parsed as JSON.",
-                    "response_text": (await response.text())[:200]
-                }
+    for attempt in range(MAX_RETRY_ATTEMPTS + 1):
+        try:
+            async with session.post(
+                endpoint_path,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as response:
+                if response.status != 200:
+                    return None, {
+                        "error_type": "HTTP Error",
+                        "status_code": response.status,
+                        "message": f"Received status code {response.status}.",
+                        "response_text": (await response.text())[:200]
+                    }
 
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        return None, {
-            "error_type": "ConnectionError",
-            "message": f"{type(e).__name__}: {e}"
-        }
+                try:
+                    return await response.json(content_type=None), None
+                except Exception:
+                    return None, {
+                        "error_type": "JSON Decode Error",
+                        "message": "API response could not be parsed as JSON.",
+                        "response_text": (await response.text())[:200]
+                    }
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            last_error = e
+            if attempt < MAX_RETRY_ATTEMPTS:
+                wait = max(retry_base_delay, 1.0) * (2 ** attempt)
+                logger.warning(
+                    f"Network error on attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS + 1} "
+                    f"({type(e).__name__}: {e}). Retrying in {wait:.1f}s..."
+                )
+                await asyncio.sleep(wait)
+
+    return None, {
+        "error_type": "ConnectionError",
+        "message": f"{type(last_error).__name__}: {last_error}",
+        "retries_attempted": MAX_RETRY_ATTEMPTS,
+    }
 
 
 def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional[Dict[str, Any]]:
@@ -157,7 +172,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
             submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
             payload = _prepare_payload(record)
 
-            response_data, execution_error = await _execute_request(session, base_endpoint, payload)
+            response_data, execution_error = await _execute_request(session, base_endpoint, payload, retry_base_delay=request_delay)
             logging.debug(f"[{submission_id}] grade={record.get('grade')} | REQUEST: {payload} | RESPONSE: {response_data or execution_error}")
 
             async with lock:
