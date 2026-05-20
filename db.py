@@ -27,7 +27,7 @@ def get_db_connection() -> Connection:
         raise
 
 
-def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str, seed: float) -> List[Dict[str, Any]]:
+def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str, seed: float, excluded_ids: List[str] = []) -> List[Dict[str, Any]]:
     """Fetches data using the provided complex query with SQLAlchemy."""
     limit = max(1, sql_limit)
 
@@ -43,6 +43,12 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
     if grade_params_json:
         where_clauses.append("RA.\"gradeParams\"::jsonb = (:params_param)::jsonb")
         query_params["params_param"] = grade_params_json
+
+    if excluded_ids:
+        cast_placeholders = ", ".join(f"CAST(:excl_{i} AS UUID)" for i in range(len(excluded_ids)))
+        where_clauses.append(f"S.id NOT IN ({cast_placeholders})")
+        for i, exc_id in enumerate(excluded_ids):
+            query_params[f"excl_{i}"] = exc_id
 
     where_sql = " AND ".join(where_clauses)
 

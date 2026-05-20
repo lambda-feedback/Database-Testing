@@ -32,6 +32,11 @@ on:
         required: false
         type: string
         default: '100'
+      ids_to_exclude:
+        description: 'Comma-separated submission UUIDs to add to the exclusion list before testing.'
+        required: false
+        type: string
+        default: ''
     secrets:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
@@ -50,6 +55,46 @@ on:
         required: false
       GCP_PROJECT_ID:
         required: false
+  workflow_dispatch:
+    inputs:
+      eval_function:
+        description: 'Evaluation Function Name'
+        required: true
+        type: string
+      endpoint:
+        description: 'API Endpoint URL to test'
+        required: true
+        type: string
+      ids_to_exclude:
+        description: 'Comma-separated submission UUIDs to add to the exclusion list before testing.'
+        required: false
+        type: string
+        default: ''
+      sql_limit:
+        description: 'Max number of records to fetch'
+        required: false
+        type: string
+        default: '1000'
+      request_delay:
+        description: 'Delay (seconds) between dispatching requests'
+        required: false
+        type: string
+        default: '0'
+      max_concurrency:
+        description: 'Max concurrent requests'
+        required: false
+        type: string
+        default: '5'
+      seed:
+        description: 'Random seed for reproducible sampling (float in [-1.0, 1.0]). Leave blank to auto-generate.'
+        required: false
+        type: string
+        default: ''
+      pass_threshold:
+        description: 'Minimum pass rate % (0-100) required for the test to succeed.'
+        required: false
+        type: string
+        default: '100'
 
 jobs:
   run_test:
@@ -80,6 +125,19 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
 
+      - name: Add exclusions to Firestore
+        if: inputs.ids_to_exclude != ''
+        working-directory: ./Database-Testing
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        run: |
+          set -euo pipefail
+          IDS=$(echo "${{ inputs.ids_to_exclude }}" | tr ',' ' ')
+          python3 manage_exclusions.py \
+            --eval_function_name "${{ inputs.eval_function }}" \
+            add --ids $IDS
+
       - name: Run Evaluation Function Against Database
         id: run_script
         working-directory: ./Database-Testing
@@ -101,7 +159,7 @@ jobs:
           fi
 
           if ! python3 test_evaluation_function.py \
-            --endpoint "${{ secrets.TEST_API_ENDPOINT }}" \
+            --endpoint "${{ secrets.TEST_API_ENDPOINT || inputs.endpoint }}" \
             --eval_function_name "${{ inputs.eval_function }}" \
             --sql_limit "${{ inputs.sql_limit }}" \
             --grade_params_json "" \
@@ -198,7 +256,7 @@ jobs:
           {
             echo "## ${STATUS_EMOJI} Endpoint Validation Report"
             echo "---"
-            echo "**Endpoint:** ${{ secrets.TEST_API_ENDPOINT }}"
+            echo "**Endpoint:** ${{ secrets.TEST_API_ENDPOINT || inputs.endpoint }}"
             echo "**Evaluation Function:** ${{ inputs.eval_function }}"
             echo ""
             echo "| Metric | Value |"

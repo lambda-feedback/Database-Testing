@@ -35,6 +35,22 @@ def get_firestore_console_link(project_id: str, collection: str, doc_id: str) ->
     return f"https://console.cloud.google.com/firestore/databases/-default-/data/panel/{collection}/{doc_id}?project={project_id}"
 
 
+def fetch_excluded_submission_ids(db: firestore.Client, eval_function_name: str) -> List[str]:
+    """Fetch the list of excluded submission IDs for an eval function. Returns [] on any error."""
+    try:
+        snapshot = db.collection("excluded-submissions").document(eval_function_name).get()
+        if not snapshot.exists:
+            logger.info(f"No exclusion document found for {eval_function_name}, proceeding with no exclusions.")
+            return []
+        ids = snapshot.get("ids") or []
+        ids = [str(i).strip() for i in ids if str(i).strip()]
+        logger.info(f"Fetched {len(ids)} excluded submission IDs for {eval_function_name}.")
+        return ids
+    except Exception as e:
+        logger.warning(f"Could not fetch excluded submission IDs: {e}. Proceeding with no exclusions.")
+        return []
+
+
 def save_test_results_to_firestore(
         db: firestore.Client,
         project_id: str,

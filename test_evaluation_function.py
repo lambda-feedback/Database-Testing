@@ -8,7 +8,7 @@ import sys
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAULT_SQL_LIMIT, REPORT_FILENAME
 from db import get_db_connection, fetch_data
 from evaluator import test_endpoint
-from firestore_client import get_firestore_client, save_test_results_to_firestore
+from firestore_client import get_firestore_client, save_test_results_to_firestore, fetch_excluded_submission_ids
 
 
 def start_test(event, context):
@@ -65,8 +65,13 @@ def start_test(event, context):
             'seed': seed,
         }
 
+        excluded_ids = fetch_excluded_submission_ids(db, eval_function_name)
+        if excluded_ids:
+            logger.info(f"Excluding {len(excluded_ids)} submission ID(s) from sample: {excluded_ids}")
+        else:
+            logger.info("No submission ID exclusions configured for this function.")
         conn = get_db_connection()
-        data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json, seed)
+        data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json, seed, excluded_ids)
         conn.close()
         conn = None
         results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency))
