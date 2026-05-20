@@ -45,8 +45,8 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
         query_params["params_param"] = grade_params_json
 
     if excluded_ids:
-        placeholders = ", ".join(f":excl_{i}" for i in range(len(excluded_ids)))
-        where_clauses.append(f"S.id::text NOT IN ({placeholders})")
+        cast_placeholders = ", ".join(f":excl_{i}::uuid" for i in range(len(excluded_ids)))
+        where_clauses.append(f"S.id NOT IN ({cast_placeholders})")
         for i, exc_id in enumerate(excluded_ids):
             query_params[f"excl_{i}"] = exc_id
 

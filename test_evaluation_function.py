@@ -66,6 +66,10 @@ def start_test(event, context):
         }
 
         excluded_ids = fetch_excluded_submission_ids(db, eval_function_name)
+        if excluded_ids:
+            logger.info(f"Excluding {len(excluded_ids)} submission ID(s) from sample: {excluded_ids}")
+        else:
+            logger.info("No submission ID exclusions configured for this function.")
         conn = get_db_connection()
         data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json, seed, excluded_ids)
         conn.close()

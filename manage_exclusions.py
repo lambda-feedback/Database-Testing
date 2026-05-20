@@ -18,12 +18,14 @@ def _handle_add(db: firestore.Client, args: argparse.Namespace) -> None:
 
     if args.from_csv:
         try:
+            total_rows = 0
             with open(args.from_csv, newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
+                for row in csv.DictReader(f):
+                    total_rows += 1
                     sid = (row.get("submission_id") or "").strip()
                     if sid:
                         ids_to_add.add(sid)
+            print(f"  {args.from_csv}: {len(ids_to_add)} valid ID(s) from {total_rows} row(s).")
         except FileNotFoundError:
             logger.error(f"CSV file not found: {args.from_csv}")
             sys.exit(1)
