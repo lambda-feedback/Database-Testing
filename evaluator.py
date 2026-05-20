@@ -132,7 +132,8 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     successful_requests = 0
     errors = []
     network_errors = []
-    warnings = []
+    feedback_warnings = []
+    parsing_warnings = []
     validation_error_count = 0
     network_error_count = 0
     completed_count = 0
@@ -177,13 +178,26 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 validation_error = _validate_response(response_data, record.get('grade'))
 
                 if validation_error:
-                    validation_error_count += 1
-                    validation_error['submission_id'] = submission_id
-                    validation_error['request_payload'] = payload
-                    errors.append(validation_error)
-                    if validation_error_count >= MAX_ERROR_THRESHOLD:
-                        logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
-                        stop_event.set()
+                    if (record.get('historical_error_message') is not None
+                            and validation_error.get('error_type') == 'Grader Exception'):
+                        parsing_warnings.append({
+                            "warning_type": "Parsing Error",
+                            "message": validation_error.get('message'),
+                            "detail": validation_error.get('detail', ''),
+                            "historical_error_message": record.get('historical_error_message'),
+                            "historical_error_detail": record.get('historical_error_detail'),
+                            "submission_id": submission_id,
+                            "request_payload": payload,
+                        })
+                        successful_requests += 1
+                    else:
+                        validation_error_count += 1
+                        validation_error['submission_id'] = submission_id
+                        validation_error['request_payload'] = payload
+                        errors.append(validation_error)
+                        if validation_error_count >= MAX_ERROR_THRESHOLD:
+                            logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                            stop_event.set()
                 else:
                     successful_requests += 1
 
@@ -191,7 +205,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 if feedback_warning:
                     feedback_warning['submission_id'] = submission_id
                     feedback_warning['request_payload'] = payload
-                    warnings.append(feedback_warning)
+                    feedback_warnings.append(feedback_warning)
 
                 completed_count += 1
                 if completed_count % 10 == 0:
@@ -216,5 +230,6 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
         "number_of_network_errors": network_error_count,
         "list_of_errors": errors,
         "list_of_network_errors": network_errors,
-        "list_of_warnings": warnings,
+        "list_of_feedback_warnings": feedback_warnings,
+        "list_of_parsing_warnings": parsing_warnings,
     }

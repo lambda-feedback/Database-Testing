@@ -65,7 +65,9 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
                 json_object_agg(ISYM.code, json_build_object(
                     'latex',   ISYM.symbol,
                     'aliases', ISYM.aliases
-                )) FILTER (WHERE ISYM.code IS NOT NULL) AS symbols
+                )) FILTER (WHERE ISYM.code IS NOT NULL) AS symbols,
+                S."rawResponse"::json -> 'error' ->> 'message' AS historical_error_message,
+                S."rawResponse"::json -> 'error' ->> 'detail'  AS historical_error_detail
                 {debug_column}
             FROM "Submission" S
                 INNER JOIN "ResponseArea" RA ON S."responseAreaId" = RA.id
