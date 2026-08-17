@@ -78,6 +78,9 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
             FROM "Submission" S
                 INNER JOIN "ResponseArea" RA ON S."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
+                INNER JOIN "Part" P ON RA."partId" = P.id
+                INNER JOIN "QuestionVersion" QV ON P."questionVersionId" = QV.id
+                INNER JOIN "Question" Q ON QV."questionId" = Q.id AND QV.id = Q."publishedVersionId"
                 LEFT JOIN "InputSymbol" ISYM ON ISYM."responseAreaId" = RA.id
             WHERE
                 {where_sql}
