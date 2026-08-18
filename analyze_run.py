@@ -4,24 +4,23 @@ import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from google.cloud import firestore
 
 from config import logger
 from firestore_client import get_firestore_client, get_firestore_console_link
 
-# Unit-prefix/scale mismatch heuristic (best-effort, not authoritative).
-_NUM_UNIT_RE = re.compile(r'^\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(.*)$')
-_SI_PREFIX_CHARS = set('mkMGnµc')
-_POWERS_OF_TEN = [10 ** e for e in range(-3, 7)]
-_RATIO_TOLERANCE = 0.01
+_CAVEAT_TEXT = (
+    "This analysis covers only the recorded FAILURES for this run. It cannot compute "
+    "failure RATES per parameter value because Firestore does not store a denominator "
+    "(total attempts, including passes, per param combination). All counts below are "
+    "absolute counts among failures only."
+)
 
-# Grader Exception value classification.
 _BACKTICK_RE = re.compile(r'`([^`]+)`')
-_COMMA_RE = re.compile(r',')
-_PLACEHOLDER_RE = re.compile(r'^[\W_]{1,3}$')
-_UNIT_SUFFIX_RE = re.compile(r'\d\s+[a-zA-Z/*^()\-]+$')
+
+_PARAM_SET_EXCLUDED_KEYS = ("symbols", "cases")
 
 
 def _get_run_doc_ref(db: firestore.Client, run_id: str):
@@ -54,45 +53,16 @@ def safe_get_params(item: Dict[str, Any]) -> Dict[str, Any]:
     return params if isinstance(params, dict) else {}
 
 
-def extract_magnitude_and_unit(value: Any) -> Tuple[Optional[float], str]:
+def build_param_set_key(params: Dict[str, Any]) -> str:
+    """Groups records by the full set of grading params present, whatever they are,
+    since not every eval function shares a common param like `comparison`. `symbols`
+    and `cases` are excluded — they're per-submission structural data, not grading
+    configuration, and including them would make almost every record's key unique."""
+    filtered = {k: v for k, v in params.items() if k not in _PARAM_SET_EXCLUDED_KEYS}
     try:
-        s = str(value).strip()
-        m = _NUM_UNIT_RE.match(s)
-        if not m:
-            return None, ""
-        return float(m.group(1)), m.group(2).strip()
-    except (ValueError, TypeError):
-        return None, ""
-
-
-def strip_si_prefix(unit: str) -> str:
-    if len(unit) > 1 and unit[0] in _SI_PREFIX_CHARS:
-        return unit[1:]
-    return unit
-
-
-def detect_unit_prefix_mismatch(response: Any, answer: Any) -> bool:
-    """Best-effort heuristic: flags likely SI-prefix/scale differences between
-    a response and answer string (e.g. '4000 m' vs '4 km'). Not authoritative —
-    false positives/negatives are expected."""
-    try:
-        if response is None or answer is None:
-            return False
-        mag1, unit1 = extract_magnitude_and_unit(response)
-        mag2, unit2 = extract_magnitude_and_unit(answer)
-        if mag1 is None or mag2 is None or not unit1 or not unit2:
-            return False
-        if mag1 == 0 or mag2 == 0:
-            return False
-        base1, base2 = strip_si_prefix(unit1), strip_si_prefix(unit2)
-        if not base1 or not base2:
-            return False
-        if not (base1 in base2 or base2 in base1):
-            return False
-        ratio = max(abs(mag1), abs(mag2)) / min(abs(mag1), abs(mag2))
-        return any(abs(ratio - p) / p <= _RATIO_TOLERANCE for p in _POWERS_OF_TEN)
-    except (ValueError, ZeroDivisionError, TypeError):
-        return False
+        return json.dumps(filtered, sort_keys=True, default=str)
+    except TypeError:
+        return str(sorted(filtered.items(), key=lambda kv: str(kv[0])))
 
 
 def extract_backtick_value(detail: str) -> Optional[str]:
@@ -100,21 +70,13 @@ def extract_backtick_value(detail: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def classify_structural_pattern(value: str) -> str:
-    if _COMMA_RE.search(value):
-        return "comma_separated"
-    if _PLACEHOLDER_RE.match(value):
-        return "single_char_or_placeholder"
-    if _UNIT_SUFFIX_RE.search(value):
-        return "has_unit_like_suffix"
-    return "other"
-
-
-def classify_exception_value(detail: str, response: Any, answer: Any) -> Dict[str, Optional[str]]:
+def classify_exception_side(detail: str, response: Any, answer: Any) -> str:
+    """Determines whether the response or the answer string is the one that failed
+    to parse, by matching the backtick-quoted value in the exception detail message."""
     try:
         extracted = extract_backtick_value(detail)
         if extracted is None:
-            return {"side": "unknown", "structural_tag": "other", "extracted_value": None}
+            return "unknown"
 
         resp_str = str(response) if response is not None else ""
         ans_str = str(answer) if answer is not None else ""
@@ -122,39 +84,22 @@ def classify_exception_value(detail: str, response: Any, answer: Any) -> Dict[st
         ans_match = bool(ans_str) and (extracted == ans_str or extracted in ans_str)
 
         if resp_match and not ans_match:
-            side = "response"
-        elif ans_match and not resp_match:
-            side = "answer"
-        else:
-            side = "unknown"
-
-        return {
-            "side": side,
-            "structural_tag": classify_structural_pattern(extracted),
-            "extracted_value": extracted,
-        }
+            return "response"
+        if ans_match and not resp_match:
+            return "answer"
+        return "unknown"
     except Exception:
-        return {"side": "unknown", "structural_tag": "other", "extracted_value": None}
+        return "unknown"
 
 
 def categorize_grade_mismatch(items: List[Dict[str, Any]], top_n: int) -> Dict[str, Any]:
     mismatches = [i for i in items if i.get("error_type") == "**Grade Mismatch**"]
 
-    by_comparison_mode: Counter = Counter()
-    by_comparison_mode_and_direction: Counter = Counter()
-    flagged_examples: List[Dict[str, Any]] = []
-    flagged_count = 0
+    by_direction: Counter = Counter()
+    by_param_set_and_direction: Counter = Counter()
 
     for item in mismatches:
-        params = safe_get_params(item)
-        comparison = params.get("comparison")
-        if comparison is None:
-            mode_label = "(default)"
-        elif comparison == "":
-            mode_label = "(empty)"
-        else:
-            mode_label = str(comparison)
-        by_comparison_mode[mode_label] += 1
+        param_set_key = build_param_set_key(safe_get_params(item))
 
         original_grade = item.get("original_grade")
         if original_grade is True:
@@ -163,29 +108,14 @@ def categorize_grade_mismatch(items: List[Dict[str, Any]], top_n: int) -> Dict[s
             direction = "false_became_true"
         else:
             direction = "unknown_direction"
-        by_comparison_mode_and_direction[f"{mode_label}|{direction}"] += 1
 
-        response = safe_get(item, "request_payload", "response")
-        answer = safe_get(item, "request_payload", "answer")
-        if detect_unit_prefix_mismatch(response, answer):
-            flagged_count += 1
-            if len(flagged_examples) < top_n:
-                flagged_examples.append({
-                    "submission_id": item.get("submission_id"),
-                    "response": response,
-                    "answer": answer,
-                    "comparison": mode_label,
-                })
+        by_direction[direction] += 1
+        by_param_set_and_direction[f"{param_set_key}|{direction}"] += 1
 
     return {
         "total": len(mismatches),
-        "by_comparison_mode": dict(by_comparison_mode),
-        "by_comparison_mode_and_direction": dict(by_comparison_mode_and_direction),
-        "unit_prefix_mismatch_heuristic": {
-            "flagged_count": flagged_count,
-            "examples": flagged_examples,
-            "note": "heuristic, not authoritative",
-        },
+        "by_direction": dict(by_direction),
+        "by_param_set_and_direction": dict(by_param_set_and_direction),
         "examples": mismatches[:top_n],
     }
 
@@ -194,24 +124,16 @@ def categorize_grader_exception(items: List[Dict[str, Any]], top_n: int) -> Dict
     exceptions = [i for i in items if i.get("error_type") == "Grader Exception"]
 
     by_failing_side: Counter = Counter()
-    by_side_and_structural_tag: Counter = Counter()
-    examples: List[Dict[str, Any]] = []
-
     for item in exceptions:
         response = safe_get(item, "request_payload", "response")
         answer = safe_get(item, "request_payload", "answer")
-        classification = classify_exception_value(item.get("detail", ""), response, answer)
-        by_failing_side[classification["side"]] += 1
-        by_side_and_structural_tag[f"{classification['side']}|{classification['structural_tag']}"] += 1
-
-        if len(examples) < top_n:
-            examples.append({**item, "classification": classification})
+        side = classify_exception_side(item.get("detail", ""), response, answer)
+        by_failing_side[side] += 1
 
     return {
         "total": len(exceptions),
         "by_failing_side": dict(by_failing_side),
-        "by_side_and_structural_tag": dict(by_side_and_structural_tag),
-        "examples": examples,
+        "examples": exceptions[:top_n],
     }
 
 
@@ -220,48 +142,16 @@ def categorize_missing_api_field(items: List[Dict[str, Any]], top_n: int) -> Dic
     return {"total": len(missing), "examples": missing[:top_n]}
 
 
-def categorize_param_signals(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    symbols_present_count = 0
-    cases_present_count = 0
-    rtol_values: List[float] = []
-
-    for item in items:
-        params = safe_get_params(item)
-        try:
-            if bool(params.get("symbols")):
-                symbols_present_count += 1
-        except TypeError:
-            pass
-        try:
-            if bool(params.get("cases")):
-                cases_present_count += 1
-        except TypeError:
-            pass
-        rtol = params.get("rtol")
-        if isinstance(rtol, (int, float)) and not isinstance(rtol, bool):
-            rtol_values.append(rtol)
-
-    return {
-        "symbols_present_count": symbols_present_count,
-        "cases_present_count": cases_present_count,
-        "rtol_stats": {
-            "count_non_null": len(rtol_values),
-            "min": min(rtol_values) if rtol_values else None,
-            "max": max(rtol_values) if rtol_values else None,
-        },
-        "total_errors_considered": len(items),
-    }
-
-
 def categorize_errors(items: List[Dict[str, Any]], top_n: int) -> Dict[str, Any]:
     by_error_type = Counter(item.get("error_type", "(unknown)") for item in items)
+    by_param_set = Counter(build_param_set_key(safe_get_params(item)) for item in items)
     return {
         "total": len(items),
         "by_error_type": dict(by_error_type),
+        "by_param_set": dict(by_param_set),
         "grade_mismatch": categorize_grade_mismatch(items, top_n),
         "grader_exception": categorize_grader_exception(items, top_n),
         "missing_api_field": categorize_missing_api_field(items, top_n),
-        "param_signals": categorize_param_signals(items),
     }
 
 
@@ -285,46 +175,6 @@ def summarize_feedback_warnings(items: List[Dict[str, Any]], top_n: int) -> Dict
     }
 
 
-def build_signals(errors_cat: Dict[str, Any]) -> List[Dict[str, Any]]:
-    signals: List[Dict[str, Any]] = []
-    by_mode = errors_cat.get("grade_mismatch", {}).get("by_comparison_mode", {})
-    for mode, count in by_mode.items():
-        if count <= 0:
-            continue
-        signals.append({
-            "topic": f"comparison mode '{mode}'",
-            "failure_count": count,
-            "interpretation_hint_unsupported_feature": (
-                "high count here may indicate this comparison mode is unsupported "
-                "or behaves differently in the tested function"
-            ),
-            "interpretation_hint_param_tuning": (
-                "alternatively, this may simply be the most heavily-sampled mode "
-                "in this run and/or need different grade_params tuning"
-            ),
-        })
-
-    by_direction: Counter = Counter()
-    for key, count in errors_cat.get("grade_mismatch", {}).get("by_comparison_mode_and_direction", {}).items():
-        direction = key.split("|", 1)[-1]
-        by_direction[direction] += count
-    if by_direction:
-        signals.append({
-            "topic": "grade mismatch direction",
-            "counts": dict(by_direction),
-            "interpretation_hint_unsupported_feature": (
-                "'true_became_false' suggests the new function is stricter or "
-                "missing support for something the old function accepted"
-            ),
-            "interpretation_hint_param_tuning": (
-                "'false_became_true' suggests the new function is more lenient "
-                "or parses/compares differently — may just need param adjustment"
-            ),
-        })
-
-    return signals
-
-
 def _json_default(obj: Any) -> Any:
     if hasattr(obj, "isoformat"):
         return obj.isoformat()
@@ -337,7 +187,6 @@ def build_report(
         network_errors_cat: Dict[str, Any],
         feedback_warnings_cat: Dict[str, Any],
         parsing_warnings_cat: Dict[str, Any],
-        signals: List[Dict[str, Any]],
         run_id: str,
 ) -> Dict[str, Any]:
     return {
@@ -363,11 +212,11 @@ def build_report(
             "number_of_parsing_warnings": run_doc.get("number_of_parsing_warnings"),
             "pass_rate": run_doc.get("pass_rate"),
         },
+        "caveat": _CAVEAT_TEXT,
         "errors_analysis": errors_cat,
         "network_errors_analysis": network_errors_cat,
         "feedback_warnings_analysis": feedback_warnings_cat,
         "parsing_warnings_analysis": parsing_warnings_cat,
-        "signals": signals,
     }
 
 
@@ -406,35 +255,27 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
     print("By error type:")
     for line in counter_to_bullets(ea["by_error_type"]):
         print(line)
+    print("By param set:")
+    for line in counter_to_bullets(ea["by_param_set"]):
+        print(line)
 
     gm = ea["grade_mismatch"]
     print(f"\nGrade Mismatch (total: {gm['total']}):")
-    print("  By comparison mode:")
-    for line in counter_to_bullets(gm["by_comparison_mode"], indent="    "):
+    print("  By direction:")
+    for line in counter_to_bullets(gm["by_direction"], indent="    "):
         print(line)
-    print("  By comparison mode + direction:")
-    for line in counter_to_bullets(gm["by_comparison_mode_and_direction"], indent="    "):
+    print("  By param set + direction:")
+    for line in counter_to_bullets(gm["by_param_set_and_direction"], indent="    "):
         print(line)
-    print(f"  Unit-prefix mismatch heuristic flagged: {gm['unit_prefix_mismatch_heuristic']['flagged_count']} "
-          f"(best-effort, not authoritative)")
 
     ge = ea["grader_exception"]
     print(f"\nGrader Exception (total: {ge['total']}):")
     print("  By failing side:")
     for line in counter_to_bullets(ge["by_failing_side"], indent="    "):
         print(line)
-    print("  By side + structural tag:")
-    for line in counter_to_bullets(ge["by_side_and_structural_tag"], indent="    "):
-        print(line)
 
     maf = ea["missing_api_field"]
     print(f"\nMissing API Field (total: {maf['total']})")
-
-    ps = ea["param_signals"]
-    print(f"\nParam signals (across all errors, total considered: {ps['total_errors_considered']}):")
-    print(f"  symbols present: {ps['symbols_present_count']}")
-    print(f"  cases present: {ps['cases_present_count']}")
-    print(f"  rtol stats: {ps['rtol_stats']}")
 
     ne = report["network_errors_analysis"]
     print(f"\n=== Network Errors (total: {ne['total']}) ===")
@@ -452,16 +293,6 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
     print(f"\n=== Parsing Warnings (total: {pw['total']}) ===")
     for line in counter_to_bullets(pw.get("by_warning_type", {})):
         print(line)
-
-    print("\n=== Signals ===")
-    for signal in report["signals"]:
-        print(f"- {signal['topic']}")
-        if "failure_count" in signal:
-            print(f"    failures: {signal['failure_count']}")
-        if "counts" in signal:
-            print(f"    counts: {signal['counts']}")
-        print(f"    unsupported-feature hint: {signal['interpretation_hint_unsupported_feature']}")
-        print(f"    param-tuning hint: {signal['interpretation_hint_param_tuning']}")
 
 
 def main() -> None:
@@ -492,11 +323,10 @@ def main() -> None:
         network_errors_cat = summarize_light_subcollection(network_errors, "error_type", args.top_n)
         feedback_warnings_cat = summarize_feedback_warnings(feedback_warnings, args.top_n)
         parsing_warnings_cat = summarize_light_subcollection(parsing_warnings, "warning_type", args.top_n)
-        signals = build_signals(errors_cat)
 
         report = build_report(
             run_doc, errors_cat, network_errors_cat, feedback_warnings_cat,
-            parsing_warnings_cat, signals, args.run_id,
+            parsing_warnings_cat, args.run_id,
         )
 
         output_path = args.output or f"analysis_{args.run_id}.json"
