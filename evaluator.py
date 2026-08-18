@@ -44,7 +44,7 @@ def _prepare_mued_payload(record: Dict[str, Any], schema: MuEdSchema) -> Dict[st
     payload: Dict[str, Any] = {
         "submission": {
             "type": REQUIRED_ARTEFACT_TYPE,
-            "content": {"expression": response},
+            "content": {"value": response},
         },
     }
 
@@ -54,7 +54,7 @@ def _prepare_mued_payload(record: Dict[str, Any], schema: MuEdSchema) -> Dict[st
             answer = answer.replace('"', '')
         payload["task"] = {
             "title": "Evaluation Task",
-            "referenceSolution": {"expression": answer},
+            "referenceSolution": {"value": answer},
         }
 
     grade_params = record.get('grade_params') or {}
