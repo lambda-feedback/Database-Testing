@@ -4,11 +4,23 @@ import json
 import os
 import random
 import sys
+from typing import Dict, List
 
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAULT_SQL_LIMIT, REPORT_FILENAME
 from db import get_db_connection, fetch_data
 from evaluator import test_endpoint
 from firestore_client import get_firestore_client, save_test_results_to_firestore, fetch_excluded_submission_ids
+
+
+def _parse_exclude_grade_param_args(pairs: List[str]) -> Dict[str, List[str]]:
+    """Parse repeated --exclude_grade_param KEY=VALUE args into {key: [values]}."""
+    result: Dict[str, List[str]] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ValueError(f"Invalid --exclude_grade_param value '{pair}', expected KEY=VALUE")
+        key, _, value = pair.partition("=")
+        result.setdefault(key, []).append(value)
+    return result
 
 
 def start_test(event, context):
@@ -37,6 +49,7 @@ def start_test(event, context):
         eval_function_name = payload.get('eval_function_name')
         source_eval_function_name = payload.get('source_eval_function_name') or eval_function_name
         grade_params_json = payload.get('grade_params_json')
+        exclude_grade_params = payload.get('exclude_grade_params') or {}
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
         seed = payload.get('seed')
@@ -72,8 +85,10 @@ def start_test(event, context):
             logger.info(f"Excluding {len(excluded_ids)} submission ID(s) from sample: {excluded_ids}")
         else:
             logger.info("No submission ID exclusions configured for this function.")
+        if exclude_grade_params:
+            logger.info(f"Excluding records matching gradeParams: {exclude_grade_params}")
         conn = get_db_connection()
-        data_for_test = fetch_data(conn, sql_limit, source_eval_function_name, grade_params_json, seed, excluded_ids)
+        data_for_test = fetch_data(conn, sql_limit, source_eval_function_name, grade_params_json, seed, excluded_ids, exclude_grade_params)
         conn.close()
         conn = None
         results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency))
@@ -150,6 +165,13 @@ if __name__ == "__main__":
                              "provided, still filters by this SOURCE function's gradeParams shape, not the target's.")
     parser.add_argument("--sql_limit", type=int, default=100, help="Max number of records to fetch")
     parser.add_argument("--grade_params_json", default="", help="Grade parameters as JSON string")
+    parser.add_argument(
+        "--exclude_grade_param", action="append", default=[], metavar="KEY=VALUE",
+        help="Exclude records where gradeParams[KEY] equals VALUE (text comparison). "
+             "Repeatable: multiple values for the same KEY are OR'd (excluded if any match); "
+             "different KEYs are AND'd (each independently narrows the sample). "
+             "Example: --exclude_grade_param comparison=buckinghamPi"
+    )
     parser.add_argument("--request_delay", type=float, default=DEFAULT_REQUEST_DELAY,
                         help="Delay in seconds between dispatching each request (default: 0.0)")
     parser.add_argument("--max_concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY,
@@ -165,6 +187,7 @@ if __name__ == "__main__":
         "source_eval_function_name": args.source_eval_function_name,
         "sql_limit": args.sql_limit,
         "grade_params_json": args.grade_params_json,
+        "exclude_grade_params": _parse_exclude_grade_param_args(args.exclude_grade_param),
         "request_delay": args.request_delay,
         "max_concurrency": args.max_concurrency,
         "seed": args.seed,
