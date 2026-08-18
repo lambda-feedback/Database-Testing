@@ -38,7 +38,7 @@ on:
         type: string
         default: ''
       api_mode:
-        description: 'API contract to test against: legacy or mued. NOTE: mued requires a local mued-api/spec checkout that CI does not currently provision.'
+        description: 'API contract to test against: legacy or mued.'
         required: false
         type: string
         default: 'legacy'
@@ -100,6 +100,11 @@ on:
         required: false
         type: string
         default: '100'
+      api_mode:
+        description: 'API contract to test against: legacy or mued.'
+        required: false
+        type: string
+        default: 'legacy'
 
 jobs:
   run_test:
@@ -113,6 +118,7 @@ jobs:
           ref: main
           token: ${{ github.token }}
           path: Database-Testing
+          submodules: true
 
       - name: Set up Python Environment
         uses: actions/setup-python@v5
@@ -124,6 +130,20 @@ jobs:
         run: |
           set -euo pipefail
           pip install -r requirements.txt
+
+      - name: Set up Node.js for muEd schema bundling
+        if: inputs.api_mode == 'mued'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Bundle muEd OpenAPI schema
+        if: inputs.api_mode == 'mued'
+        working-directory: ./Database-Testing/vendor/mued-api
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run bundle
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1

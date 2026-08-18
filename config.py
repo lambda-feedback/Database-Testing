@@ -13,7 +13,7 @@ REPORT_FILENAME = 'report_data.json'
 
 DEFAULT_MUED_SCHEMA_PATH = os.environ.get(
     'MUED_SCHEMA_PATH',
-    '/Users/marcus/workspace/Programming/mEd-api/dist/openapi.yml'
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor', 'mued-api', 'dist', 'openapi.yml')
 )
 
 logger = logging.getLogger()
