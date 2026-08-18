@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: ''
+      api_mode:
+        description: 'API contract to test against: legacy or mued. NOTE: mued requires a local mued-api/spec checkout that CI does not currently provision.'
+        required: false
+        type: string
+        default: 'legacy'
     secrets:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
@@ -165,6 +170,7 @@ jobs:
             --grade_params_json "" \
             --request_delay "${{ inputs.request_delay }}" \
             --max_concurrency "${{ inputs.max_concurrency }}" \
+            --api_mode "${{ inputs.api_mode }}" \
             $SEED_ARG; then
             echo "::error::Python script failed with non-zero exit code"
             exit 1
