@@ -107,35 +107,38 @@ def start_test(event, context):
             "source_eval_function_name": source_eval_function_name,
         }
 
-        firestore_doc_id, console_link = save_test_results_to_firestore(
-            db,
-            project_id,
-            results_summary,
-            test_params,
-            results['list_of_errors'],
-            results['list_of_network_errors'],
-            results['list_of_feedback_warnings'],
-            results['list_of_parsing_warnings'],
-        )
-
-        if not firestore_doc_id:
-            msg = "Failed to save results to Firestore"
-            logger.error(msg)
-            with open(REPORT_FILENAME, 'w') as f:
-                json.dump({"status": "failed", "error": msg}, f)
-            sys.exit(1)
-
-        results_summary['firestore_doc_id'] = firestore_doc_id
-        results_summary['firestore_link'] = console_link
-
-        logger.info(f"Results successfully saved to Firestore: {firestore_doc_id}")
-        logger.info(f"View results at: {console_link}")
+        try:
+            firestore_doc_id, console_link = save_test_results_to_firestore(
+                db,
+                project_id,
+                results_summary,
+                test_params,
+                results['list_of_errors'],
+                results['list_of_network_errors'],
+                results['list_of_feedback_warnings'],
+                results['list_of_parsing_warnings'],
+            )
+            results_summary['firestore_doc_id'] = firestore_doc_id
+            results_summary['firestore_link'] = console_link
+            logger.info(f"Results successfully saved to Firestore: {firestore_doc_id}")
+            logger.info(f"View results at: {console_link}")
+        except Exception as e:
+            logger.error(f"Failed to save results to Firestore: {e}. Saving results locally instead.", exc_info=True)
+            results_summary['status'] = 'completed_local_only'
+            results_summary['firestore_error'] = str(e)
+            results_summary['errors'] = results['list_of_errors']
+            results_summary['network_errors'] = results['list_of_network_errors']
+            results_summary['feedback_warnings'] = results['list_of_feedback_warnings']
+            results_summary['parsing_warnings'] = results['list_of_parsing_warnings']
 
         with open(REPORT_FILENAME, 'w') as f:
-            json.dump(results_summary, f, indent=2)
+            json.dump(results_summary, f, indent=2, default=str)
 
-        print(json.dumps(results_summary))
-        print(f"\n🔗 View results in Firestore: {console_link}")
+        print(json.dumps(results_summary, default=str))
+        if results_summary.get('firestore_link'):
+            print(f"\n🔗 View results in Firestore: {results_summary['firestore_link']}")
+        else:
+            print(f"\nFirestore save failed — full results saved locally to {REPORT_FILENAME}.")
 
         return results_summary
 
@@ -208,6 +211,9 @@ if __name__ == "__main__":
 
     print("-" * 50)
     print("Test execution finished.")
-    print(f"Results saved to Firestore with ID: {results.get('firestore_doc_id')}")
-    print(f"🔗 View in console: {results.get('firestore_link')}")
+    if results.get('firestore_doc_id'):
+        print(f"Results saved to Firestore with ID: {results['firestore_doc_id']}")
+        print(f"🔗 View in console: {results['firestore_link']}")
+    else:
+        print(f"Firestore save failed ({results.get('firestore_error')}). Full results saved locally to {REPORT_FILENAME}.")
     print("-" * 50)
