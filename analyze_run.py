@@ -11,13 +11,6 @@ from google.cloud import firestore
 from config import logger
 from firestore_client import get_firestore_client, get_firestore_console_link
 
-_CAVEAT_TEXT = (
-    "This analysis covers only the recorded FAILURES for this run. It cannot compute "
-    "failure RATES per parameter value because Firestore does not store a denominator "
-    "(total attempts, including passes, per param combination). All counts below are "
-    "absolute counts among failures only."
-)
-
 # Unit-prefix/scale mismatch heuristic (best-effort, not authoritative).
 _NUM_UNIT_RE = re.compile(r'^\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(.*)$')
 _SI_PREFIX_CHARS = set('mkMGnµc')
@@ -309,7 +302,6 @@ def build_signals(errors_cat: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "alternatively, this may simply be the most heavily-sampled mode "
                 "in this run and/or need different grade_params tuning"
             ),
-            "caveat": _CAVEAT_TEXT,
         })
 
     by_direction: Counter = Counter()
@@ -328,7 +320,6 @@ def build_signals(errors_cat: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "'false_became_true' suggests the new function is more lenient "
                 "or parses/compares differently — may just need param adjustment"
             ),
-            "caveat": _CAVEAT_TEXT,
         })
 
     return signals
@@ -372,7 +363,6 @@ def build_report(
             "number_of_parsing_warnings": run_doc.get("number_of_parsing_warnings"),
             "pass_rate": run_doc.get("pass_rate"),
         },
-        "caveat": _CAVEAT_TEXT,
         "errors_analysis": errors_cat,
         "network_errors_analysis": network_errors_cat,
         "feedback_warnings_analysis": feedback_warnings_cat,
