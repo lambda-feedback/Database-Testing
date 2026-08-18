@@ -35,6 +35,23 @@ def fetch_run(db: firestore.Client, run_id: str) -> Dict[str, Any]:
     return {**(snapshot.to_dict() or {}), "run_id": run_id}
 
 
+def fetch_latest_run(db: firestore.Client, eval_function_name: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch the most recently created test-results run, optionally scoped to one eval_function_name."""
+    query = db.collection("test-results")
+    if eval_function_name:
+        query = query.where("eval_function_name", "==", eval_function_name)
+    query = query.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1)
+
+    docs = list(query.stream())
+    if not docs:
+        scope = f" for eval_function_name={eval_function_name!r}" if eval_function_name else ""
+        logger.error(f"No test-results runs found{scope}.")
+        sys.exit(1)
+
+    snapshot = docs[0]
+    return {**(snapshot.to_dict() or {}), "run_id": snapshot.id}
+
+
 def fetch_subcollection(doc_ref, name: str) -> List[Dict[str, Any]]:
     return [d.to_dict() or {} for d in doc_ref.collection(name).stream()]
 
@@ -303,17 +320,25 @@ def main() -> None:
         pass
 
     parser = argparse.ArgumentParser(description="Analyze a stored test-results run's failures from Firestore.")
-    parser.add_argument("--run_id", required=True, help="Firestore test-results document ID")
+    parser.add_argument("--run_id", default=None,
+                        help="Firestore test-results document ID. Defaults to the most recent run "
+                             "(optionally narrowed by --eval_function_name) when omitted.")
+    parser.add_argument("--eval_function_name", default=None,
+                        help="When --run_id is omitted, only consider the latest run for this eval_function_name.")
     parser.add_argument("--output", default=None, help="Path to write the JSON report (default: analysis_<run_id>.json)")
     parser.add_argument("--top_n", type=int, default=5, help="Max example records kept per category bucket (default: 5)")
 
     args = parser.parse_args()
 
     db, project_id = get_firestore_client()
-    run_doc = fetch_run(db, args.run_id)
+    if args.run_id:
+        run_doc = fetch_run(db, args.run_id)
+    else:
+        run_doc = fetch_latest_run(db, args.eval_function_name)
+    run_id = run_doc["run_id"]
 
     try:
-        doc_ref = _get_run_doc_ref(db, args.run_id)
+        doc_ref = _get_run_doc_ref(db, run_id)
         errors = fetch_subcollection(doc_ref, "errors")
         network_errors = fetch_subcollection(doc_ref, "network_errors")
         feedback_warnings = fetch_subcollection(doc_ref, "feedback_warnings")
@@ -326,10 +351,10 @@ def main() -> None:
 
         report = build_report(
             run_doc, errors_cat, network_errors_cat, feedback_warnings_cat,
-            parsing_warnings_cat, args.run_id,
+            parsing_warnings_cat, run_id,
         )
 
-        output_path = args.output or f"analysis_{args.run_id}.json"
+        output_path = args.output or f"analysis_{run_id}.json"
         with open(output_path, "w") as f:
             json.dump(report, f, indent=2, default=_json_default)
 
