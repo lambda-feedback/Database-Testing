@@ -35,6 +35,7 @@ def start_test(event, context):
         endpoint_to_test = payload.get('endpoint')
         sql_limit = int(payload.get('sql_limit', DEFAULT_SQL_LIMIT))
         eval_function_name = payload.get('eval_function_name')
+        source_eval_function_name = payload.get('source_eval_function_name') or eval_function_name
         grade_params_json = payload.get('grade_params_json')
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
@@ -58,6 +59,7 @@ def start_test(event, context):
         test_params = {
             'endpoint': endpoint_to_test,
             'eval_function_name': eval_function_name,
+            'source_eval_function_name': source_eval_function_name,
             'sql_limit': sql_limit,
             'grade_params_json': grade_params_json,
             'request_delay': request_delay,
@@ -65,13 +67,13 @@ def start_test(event, context):
             'seed': seed,
         }
 
-        excluded_ids = fetch_excluded_submission_ids(db, eval_function_name)
+        excluded_ids = fetch_excluded_submission_ids(db, source_eval_function_name)
         if excluded_ids:
             logger.info(f"Excluding {len(excluded_ids)} submission ID(s) from sample: {excluded_ids}")
         else:
             logger.info("No submission ID exclusions configured for this function.")
         conn = get_db_connection()
-        data_for_test = fetch_data(conn, sql_limit, eval_function_name, grade_params_json, seed, excluded_ids)
+        data_for_test = fetch_data(conn, sql_limit, source_eval_function_name, grade_params_json, seed, excluded_ids)
         conn.close()
         conn = None
         results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency))
@@ -86,6 +88,8 @@ def start_test(event, context):
             "number_of_feedback_warnings": len(results['list_of_feedback_warnings']),
             "number_of_parsing_warnings": len(results['list_of_parsing_warnings']),
             "seed": seed,
+            "eval_function_name": eval_function_name,
+            "source_eval_function_name": source_eval_function_name,
         }
 
         firestore_doc_id, console_link = save_test_results_to_firestore(
@@ -138,6 +142,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run endpoint validation tests.")
     parser.add_argument("--endpoint", required=True, help="API endpoint to test")
     parser.add_argument("--eval_function_name", required=True, help="Evaluation function name")
+    parser.add_argument("--source_eval_function_name", default=None,
+                        help="Evaluation function whose historical DB data and exclusion list to use as the data "
+                             "source. Defaults to --eval_function_name (self-test) when omitted. Set this to a "
+                             "different/deprecated function's name to test its historical submissions against the "
+                             "--eval_function_name endpoint (cross-function test). Note: --grade_params_json, if "
+                             "provided, still filters by this SOURCE function's gradeParams shape, not the target's.")
     parser.add_argument("--sql_limit", type=int, default=100, help="Max number of records to fetch")
     parser.add_argument("--grade_params_json", default="", help="Grade parameters as JSON string")
     parser.add_argument("--request_delay", type=float, default=DEFAULT_REQUEST_DELAY,
@@ -152,6 +162,7 @@ if __name__ == "__main__":
     test_event = {
         "endpoint": args.endpoint,
         "eval_function_name": args.eval_function_name,
+        "source_eval_function_name": args.source_eval_function_name,
         "sql_limit": args.sql_limit,
         "grade_params_json": args.grade_params_json,
         "request_delay": args.request_delay,
@@ -161,8 +172,12 @@ if __name__ == "__main__":
 
     print("-" * 50)
     print("Starting test execution...")
+    resolved_source = args.source_eval_function_name or args.eval_function_name
     print(f"Endpoint: {test_event['endpoint']}")
-    print(f"Function: {test_event['eval_function_name']}")
+    if resolved_source != args.eval_function_name:
+        print(f"Source data: {resolved_source}  ->  Testing against: {args.eval_function_name}")
+    else:
+        print(f"Function: {args.eval_function_name}")
     print(f"SQL Limit: {test_event['sql_limit']}")
     print("-" * 50)
 
