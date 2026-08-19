@@ -8,7 +8,7 @@ import aiohttp
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, MAX_ERROR_THRESHOLD, MAX_RETRY_ATTEMPTS
 
 
-def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
+def _prepare_payload(record: Dict[str, Any], eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Constructs the JSON payload for the API request from the DB record."""
     grade_params = record.get('grade_params') or {}
     response = record.get('submission')
@@ -29,6 +29,7 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
         "answer": answer,
         "params": {
             **grade_params,
+            **(eval_function_params or {}),
             "symbols": symbols,
             "cases": cases,
         }
@@ -143,7 +144,8 @@ def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional
 async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         request_delay: float = DEFAULT_REQUEST_DELAY,
                         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
-                        max_error_threshold: Union[int, float] = MAX_ERROR_THRESHOLD) -> Dict[str, Any]:
+                        max_error_threshold: Union[int, float] = MAX_ERROR_THRESHOLD,
+                        eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Tests the endpoint against all records concurrently, returns aggregated results.
 
     max_error_threshold is either a whole number (absolute error count) or a float in
@@ -185,7 +187,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 return
 
             submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
-            payload = _prepare_payload(record)
+            payload = _prepare_payload(record, eval_function_params)
 
             response_data, execution_error = await _execute_request(session, base_endpoint, payload, retry_base_delay=request_delay)
             logging.debug(f"[{submission_id}] grade={record.get('grade')} | REQUEST: {payload} | RESPONSE: {response_data or execution_error}")

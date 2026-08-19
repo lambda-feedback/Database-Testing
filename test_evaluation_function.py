@@ -4,7 +4,7 @@ import json
 import os
 import random
 import sys
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Union
 
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAULT_SQL_LIMIT, MAX_ERROR_THRESHOLD, REPORT_FILENAME
 from db import get_db_connection, fetch_data
@@ -20,6 +20,21 @@ def _parse_exclude_grade_param_args(pairs: List[str]) -> Dict[str, List[str]]:
             raise ValueError(f"Invalid --exclude_grade_param value '{pair}', expected KEY=VALUE")
         key, _, value = pair.partition("=")
         result.setdefault(key, []).append(value)
+    return result
+
+
+def _parse_eval_function_param_args(pairs: List[str]) -> Dict[str, Any]:
+    """Parse repeated --eval_function_param KEY=VALUE args into a flat dict,
+    JSON-decoding each VALUE (falling back to the raw string if not valid JSON)."""
+    result: Dict[str, Any] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise ValueError(f"Invalid --eval_function_param value '{pair}', expected KEY=VALUE")
+        key, _, value = pair.partition("=")
+        try:
+            result[key] = json.loads(value)
+        except json.JSONDecodeError:
+            result[key] = value
     return result
 
 
@@ -62,6 +77,7 @@ def start_test(event, context):
         source_eval_function_name = payload.get('source_eval_function_name') or eval_function_name
         grade_params_json = payload.get('grade_params_json')
         exclude_grade_params = payload.get('exclude_grade_params') or {}
+        eval_function_params = payload.get('eval_function_params') or {}
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
         max_error_threshold = _parse_max_error_threshold(payload.get('max_error_threshold', MAX_ERROR_THRESHOLD))
@@ -92,6 +108,7 @@ def start_test(event, context):
             'max_concurrency': max_concurrency,
             'max_error_threshold': max_error_threshold,
             'seed': seed,
+            'eval_function_params': eval_function_params,
         }
 
         excluded_ids = fetch_excluded_submission_ids(db, source_eval_function_name)
@@ -101,11 +118,13 @@ def start_test(event, context):
             logger.info("No submission ID exclusions configured for this function.")
         if exclude_grade_params:
             logger.info(f"Excluding records matching gradeParams: {exclude_grade_params}")
+        if eval_function_params:
+            logger.info(f"Overriding/adding eval function params: {eval_function_params}")
         conn = get_db_connection()
         data_for_test = fetch_data(conn, sql_limit, source_eval_function_name, grade_params_json, seed, excluded_ids, exclude_grade_params)
         conn.close()
         conn = None
-        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency, max_error_threshold))
+        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency, max_error_threshold, eval_function_params))
 
         results_summary = {
             "status": "success",
@@ -189,6 +208,13 @@ if __name__ == "__main__":
              "different KEYs are AND'd (each independently narrows the sample). "
              "Example: --exclude_grade_param comparison=buckinghamPi"
     )
+    parser.add_argument(
+        "--eval_function_param", action="append", default=[], metavar="KEY=VALUE",
+        help="Add/override a param sent to the eval function under test, regardless of the "
+             "record's stored gradeParams. Value is JSON-decoded (true/false/numbers/quoted "
+             "strings); falls back to a raw string if not valid JSON. Repeatable. "
+             "Example: --eval_function_param physical_quantity=true"
+    )
     parser.add_argument("--request_delay", type=float, default=DEFAULT_REQUEST_DELAY,
                         help="Delay in seconds between dispatching each request (default: 0.0)")
     parser.add_argument("--max_concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY,
@@ -210,6 +236,7 @@ if __name__ == "__main__":
         "sql_limit": args.sql_limit,
         "grade_params_json": args.grade_params_json,
         "exclude_grade_params": _parse_exclude_grade_param_args(args.exclude_grade_param),
+        "eval_function_params": _parse_eval_function_param_args(args.eval_function_param),
         "request_delay": args.request_delay,
         "max_concurrency": args.max_concurrency,
         "max_error_threshold": args.max_error_threshold,
