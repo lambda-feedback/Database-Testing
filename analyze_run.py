@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import re
 import sys
@@ -242,6 +243,61 @@ def counter_to_bullets(counter: Dict[str, int], indent: str = "  ") -> List[str]
     return [f"{indent}{key}: {count}" for key, count in items]
 
 
+def format_record_line(item: Dict[str, Any], indent: str = "    ") -> str:
+    submission_id = item.get("submission_id", "(unknown)")
+    answer = safe_get(item, "request_payload", "answer")
+    response = safe_get(item, "request_payload", "response")
+    return f"{indent}[{submission_id}] answer={answer!r}  response={response!r}"
+
+
+def print_examples(examples: List[Dict[str, Any]], top_n: int, indent: str = "  ") -> None:
+    if not examples:
+        return
+    print(f"{indent}Examples (showing up to {top_n}):")
+    for item in examples:
+        print(format_record_line(item, indent=indent + "  "))
+
+
+def flatten_records(
+        errors: List[Dict[str, Any]],
+        network_errors: List[Dict[str, Any]],
+        feedback_warnings: List[Dict[str, Any]],
+        parsing_warnings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Flattens every record across all four subcollections into one row per record,
+    for a full untruncated CSV export (the JSON report's examples are capped at top_n)."""
+    rows = []
+
+    def add(items: List[Dict[str, Any]], category: str) -> None:
+        for item in items:
+            params = safe_get_params(item)
+            rows.append({
+                "category": category,
+                "type": item.get("error_type") or item.get("warning_type") or "(unknown)",
+                "submission_id": item.get("submission_id"),
+                "param_set": build_param_set_key(params),
+                "original_grade": item.get("original_grade"),
+                "answer": safe_get(item, "request_payload", "answer"),
+                "response": safe_get(item, "request_payload", "response"),
+                "message": item.get("message"),
+            })
+
+    add(errors, "errors")
+    add(network_errors, "network_errors")
+    add(feedback_warnings, "feedback_warnings")
+    add(parsing_warnings, "parsing_warnings")
+    return rows
+
+
+def write_csv_report(rows: List[Dict[str, Any]], output_path: str) -> None:
+    fieldnames = ["category", "type", "submission_id", "param_set", "original_grade", "answer", "response", "message"]
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -> None:
     run_id = report["run_id"]
     print("-" * 60)
@@ -284,20 +340,24 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
     print("  By param set + direction:")
     for line in counter_to_bullets(gm["by_param_set_and_direction"], indent="    "):
         print(line)
+    print_examples(gm["examples"], top_n, indent="  ")
 
     ge = ea["grader_exception"]
     print(f"\nGrader Exception (total: {ge['total']}):")
     print("  By failing side:")
     for line in counter_to_bullets(ge["by_failing_side"], indent="    "):
         print(line)
+    print_examples(ge["examples"], top_n, indent="  ")
 
     maf = ea["missing_api_field"]
     print(f"\nMissing API Field (total: {maf['total']})")
+    print_examples(maf["examples"], top_n, indent="  ")
 
     ne = report["network_errors_analysis"]
     print(f"\n=== Network Errors (total: {ne['total']}) ===")
     for line in counter_to_bullets(ne.get("by_error_type", {})):
         print(line)
+    print_examples(ne["examples"], top_n, indent="  ")
 
     fw = report["feedback_warnings_analysis"]
     print(f"\n=== Feedback Warnings (total: {fw['total']}) ===")
@@ -305,11 +365,13 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
         print(line)
     print(f"  non-empty db_feedback: {fw['non_empty_db_feedback_count']}  "
           f"non-empty api_feedback: {fw['non_empty_api_feedback_count']}")
+    print_examples(fw["examples"], top_n, indent="  ")
 
     pw = report["parsing_warnings_analysis"]
     print(f"\n=== Parsing Warnings (total: {pw['total']}) ===")
     for line in counter_to_bullets(pw.get("by_warning_type", {})):
         print(line)
+    print_examples(pw["examples"], top_n, indent="  ")
 
 
 def main() -> None:
@@ -358,8 +420,13 @@ def main() -> None:
         with open(output_path, "w") as f:
             json.dump(report, f, indent=2, default=_json_default)
 
+        csv_output_path = re.sub(r"\.json$", "", output_path, flags=re.IGNORECASE) + ".csv"
+        csv_rows = flatten_records(errors, network_errors, feedback_warnings, parsing_warnings)
+        write_csv_report(csv_rows, csv_output_path)
+
         print_console_summary(report, project_id, args.top_n)
         print(f"\nFull JSON report written to: {output_path}")
+        print(f"Full CSV report written to: {csv_output_path} ({len(csv_rows)} rows)")
 
     except Exception as e:
         logger.error(f"Fatal error during analysis: {e}", exc_info=True)
