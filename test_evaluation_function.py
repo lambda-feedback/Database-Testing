@@ -6,7 +6,7 @@ import random
 import sys
 from typing import Dict, List
 
-from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAULT_SQL_LIMIT, REPORT_FILENAME
+from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAULT_SQL_LIMIT, MAX_ERROR_THRESHOLD, REPORT_FILENAME
 from db import get_db_connection, fetch_data
 from evaluator import test_endpoint
 from firestore_client import get_firestore_client, save_test_results_to_firestore, fetch_excluded_submission_ids
@@ -52,6 +52,7 @@ def start_test(event, context):
         exclude_grade_params = payload.get('exclude_grade_params') or {}
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
+        max_error_threshold = int(payload.get('max_error_threshold', MAX_ERROR_THRESHOLD))
         seed = payload.get('seed')
         if seed is None:
             seed = random.uniform(-1.0, 1.0)
@@ -77,6 +78,7 @@ def start_test(event, context):
             'grade_params_json': grade_params_json,
             'request_delay': request_delay,
             'max_concurrency': max_concurrency,
+            'max_error_threshold': max_error_threshold,
             'seed': seed,
         }
 
@@ -91,7 +93,7 @@ def start_test(event, context):
         data_for_test = fetch_data(conn, sql_limit, source_eval_function_name, grade_params_json, seed, excluded_ids, exclude_grade_params)
         conn.close()
         conn = None
-        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency))
+        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency, max_error_threshold))
 
         results_summary = {
             "status": "success",
@@ -179,6 +181,9 @@ if __name__ == "__main__":
                         help="Delay in seconds between dispatching each request (default: 0.0)")
     parser.add_argument("--max_concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY,
                         help="Max concurrent in-flight requests (default: 5)")
+    parser.add_argument("--max_error_threshold", type=int, default=MAX_ERROR_THRESHOLD,
+                        help=f"Stop early once either the validation-error or network-error count reaches this "
+                             f"value (default: {MAX_ERROR_THRESHOLD})")
     parser.add_argument("--seed", type=float, default=None,
                         help="Random seed for reproducible sampling (float in [-1.0, 1.0]). Auto-generated if omitted.")
 
@@ -193,6 +198,7 @@ if __name__ == "__main__":
         "exclude_grade_params": _parse_exclude_grade_param_args(args.exclude_grade_param),
         "request_delay": args.request_delay,
         "max_concurrency": args.max_concurrency,
+        "max_error_threshold": args.max_error_threshold,
         "seed": args.seed,
     }
 

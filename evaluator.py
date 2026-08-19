@@ -141,7 +141,8 @@ def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional
 
 async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         request_delay: float = DEFAULT_REQUEST_DELAY,
-                        max_concurrency: int = DEFAULT_MAX_CONCURRENCY) -> Dict[str, Any]:
+                        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+                        max_error_threshold: int = MAX_ERROR_THRESHOLD) -> Dict[str, Any]:
     """Tests the endpoint against all records concurrently, returns aggregated results."""
     total_records = len(data_records)
     successful_requests = 0
@@ -182,8 +183,8 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                     execution_error['original_grade'] = record.get('grade')
                     execution_error['request_payload'] = payload
                     network_errors.append(execution_error)
-                    if network_error_count >= MAX_ERROR_THRESHOLD:
-                        logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                    if network_error_count >= max_error_threshold:
+                        logger.warning(f"Stopping early! Reached maximum error threshold of {max_error_threshold}.")
                         stop_event.set()
                     completed_count += 1
                     if completed_count % 10 == 0:
@@ -210,8 +211,8 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         validation_error['submission_id'] = submission_id
                         validation_error['request_payload'] = payload
                         errors.append(validation_error)
-                        if validation_error_count >= MAX_ERROR_THRESHOLD:
-                            logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                        if validation_error_count >= max_error_threshold:
+                            logger.warning(f"Stopping early! Reached maximum error threshold of {max_error_threshold}.")
                             stop_event.set()
                 else:
                     successful_requests += 1
