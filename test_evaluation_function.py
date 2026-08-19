@@ -4,7 +4,7 @@ import json
 import os
 import random
 import sys
-from typing import Dict, List
+from typing import Dict, List, Union
 
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAULT_SQL_LIMIT, MAX_ERROR_THRESHOLD, REPORT_FILENAME
 from db import get_db_connection, fetch_data
@@ -21,6 +21,18 @@ def _parse_exclude_grade_param_args(pairs: List[str]) -> Dict[str, List[str]]:
         key, _, value = pair.partition("=")
         result.setdefault(key, []).append(value)
     return result
+
+
+def _parse_max_error_threshold(value) -> Union[int, float]:
+    """Parse a max_error_threshold value: a whole number is an absolute error count,
+    a float (e.g. '0.1') is a fraction in [0.0, 1.0] of the total records tested."""
+    if isinstance(value, (int, float)):
+        parsed = value
+    else:
+        parsed = float(value) if '.' in str(value) else int(value)
+    if isinstance(parsed, float) and not 0.0 <= parsed <= 1.0:
+        raise ValueError(f"max_error_threshold as a float must be between 0.0 and 1.0 (got {parsed})")
+    return parsed
 
 
 def start_test(event, context):
@@ -52,7 +64,7 @@ def start_test(event, context):
         exclude_grade_params = payload.get('exclude_grade_params') or {}
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
-        max_error_threshold = int(payload.get('max_error_threshold', MAX_ERROR_THRESHOLD))
+        max_error_threshold = _parse_max_error_threshold(payload.get('max_error_threshold', MAX_ERROR_THRESHOLD))
         seed = payload.get('seed')
         if seed is None:
             seed = random.uniform(-1.0, 1.0)
@@ -181,9 +193,11 @@ if __name__ == "__main__":
                         help="Delay in seconds between dispatching each request (default: 0.0)")
     parser.add_argument("--max_concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY,
                         help="Max concurrent in-flight requests (default: 5)")
-    parser.add_argument("--max_error_threshold", type=int, default=MAX_ERROR_THRESHOLD,
+    parser.add_argument("--max_error_threshold", type=_parse_max_error_threshold, default=MAX_ERROR_THRESHOLD,
                         help=f"Stop early once either the validation-error or network-error count reaches this "
-                             f"value (default: {MAX_ERROR_THRESHOLD})")
+                             f"value. Pass a whole number for an absolute error count, or a float in [0.0, 1.0] "
+                             f"for a fraction of the total records tested (e.g. 0.1 = 10%%) "
+                             f"(default: {MAX_ERROR_THRESHOLD})")
     parser.add_argument("--seed", type=float, default=None,
                         help="Random seed for reproducible sampling (float in [-1.0, 1.0]). Auto-generated if omitted.")
 
