@@ -1,13 +1,14 @@
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+import math
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 import aiohttp
 
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, MAX_ERROR_THRESHOLD, MAX_RETRY_ATTEMPTS
 
 
-def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
+def _prepare_payload(record: Dict[str, Any], eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Constructs the JSON payload for the API request from the DB record."""
     grade_params = record.get('grade_params') or {}
     response = record.get('submission')
@@ -28,6 +29,7 @@ def _prepare_payload(record: Dict[str, Any]) -> Dict[str, Any]:
         "answer": answer,
         "params": {
             **grade_params,
+            **(eval_function_params or {}),
             "symbols": symbols,
             "cases": cases,
         }
@@ -141,8 +143,15 @@ def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional
 
 async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         request_delay: float = DEFAULT_REQUEST_DELAY,
-                        max_concurrency: int = DEFAULT_MAX_CONCURRENCY) -> Dict[str, Any]:
-    """Tests the endpoint against all records concurrently, returns aggregated results."""
+                        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+                        max_error_threshold: Union[int, float] = MAX_ERROR_THRESHOLD,
+                        eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Tests the endpoint against all records concurrently, returns aggregated results.
+
+    max_error_threshold is either a whole number (absolute error count) or a float in
+    [0.0, 1.0] (fraction of total_records) at which either the validation-error or
+    network-error count triggers an early stop.
+    """
     total_records = len(data_records)
     successful_requests = 0
     errors = []
@@ -152,6 +161,14 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     validation_error_count = 0
     network_error_count = 0
     completed_count = 0
+
+    if isinstance(max_error_threshold, float):
+        if not 0.0 <= max_error_threshold <= 1.0:
+            raise ValueError(f"max_error_threshold as a float must be between 0.0 and 1.0 (got {max_error_threshold})")
+        effective_error_threshold = max(1, math.ceil(max_error_threshold * total_records))
+        logger.info(f"Error threshold: {max_error_threshold:.0%} of {total_records} records ({effective_error_threshold} errors)")
+    else:
+        effective_error_threshold = max_error_threshold
 
     semaphore = asyncio.Semaphore(max_concurrency)
     lock = asyncio.Lock()
@@ -170,7 +187,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 return
 
             submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
-            payload = _prepare_payload(record)
+            payload = _prepare_payload(record, eval_function_params)
 
             response_data, execution_error = await _execute_request(session, base_endpoint, payload, retry_base_delay=request_delay)
             logging.debug(f"[{submission_id}] grade={record.get('grade')} | REQUEST: {payload} | RESPONSE: {response_data or execution_error}")
@@ -182,8 +199,8 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                     execution_error['original_grade'] = record.get('grade')
                     execution_error['request_payload'] = payload
                     network_errors.append(execution_error)
-                    if network_error_count >= MAX_ERROR_THRESHOLD:
-                        logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                    if network_error_count >= effective_error_threshold:
+                        logger.warning(f"Stopping early! Reached maximum error threshold of {effective_error_threshold}.")
                         stop_event.set()
                     completed_count += 1
                     if completed_count % 10 == 0:
@@ -210,8 +227,8 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         validation_error['submission_id'] = submission_id
                         validation_error['request_payload'] = payload
                         errors.append(validation_error)
-                        if validation_error_count >= MAX_ERROR_THRESHOLD:
-                            logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                        if validation_error_count >= effective_error_threshold:
+                            logger.warning(f"Stopping early! Reached maximum error threshold of {effective_error_threshold}.")
                             stop_event.set()
                 else:
                     successful_requests += 1

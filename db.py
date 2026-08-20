@@ -27,7 +27,7 @@ def get_db_connection() -> Connection:
         raise
 
 
-def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str, seed: float, excluded_ids: List[str] = []) -> List[Dict[str, Any]]:
+def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_params_json: str, seed: float, excluded_ids: List[str] = [], excluded_grade_param_values: Dict[str, List[str]] = None) -> List[Dict[str, Any]]:
     """Fetches data using the provided complex query with SQLAlchemy."""
     limit = max(1, sql_limit)
 
@@ -49,6 +49,18 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
         where_clauses.append(f"S.id NOT IN ({cast_placeholders})")
         for i, exc_id in enumerate(excluded_ids):
             query_params[f"excl_{i}"] = exc_id
+
+    if excluded_grade_param_values:
+        for i, (key, values) in enumerate(excluded_grade_param_values.items()):
+            key_p = f"gpv_key_{i}"
+            val_ps = [f"gpv_val_{i}_{j}" for j in range(len(values))]
+            placeholders = ", ".join(f":{p}" for p in val_ps)
+            where_clauses.append(
+                f'(RA."gradeParams"->>(:{key_p}) IS NULL OR RA."gradeParams"->>(:{key_p}) NOT IN ({placeholders}))'
+            )
+            query_params[key_p] = key
+            for p, val in zip(val_ps, values):
+                query_params[p] = val
 
     where_sql = " AND ".join(where_clauses)
 
@@ -78,6 +90,9 @@ def fetch_data(conn: Connection, sql_limit: int, eval_function_name: str, grade_
             FROM "Submission" S
                 INNER JOIN "ResponseArea" RA ON S."responseAreaId" = RA.id
                 INNER JOIN "EvaluationFunction" EF ON RA."evaluationFunctionId" = EF.id
+                INNER JOIN "Part" P ON RA."partId" = P.id
+                INNER JOIN "QuestionVersion" QV ON P."questionVersionId" = QV.id
+                INNER JOIN "Question" Q ON QV."questionId" = Q.id AND QV.id = Q."publishedVersionId"
                 LEFT JOIN "InputSymbol" ISYM ON ISYM."responseAreaId" = RA.id
             WHERE
                 {where_sql}
