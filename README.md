@@ -97,7 +97,7 @@ python3 test_evaluation_function.py \
 
 ## Usage: `analyze_run.py`
 
-Digs into one stored run's failures — errors, network errors, feedback warnings, parsing warnings — beyond the summary counts saved by `test_evaluation_function.py`.
+Digs into one stored run's failures — errors, network errors, parsing warnings, and (with `--analyze_feedback`) feedback warnings — beyond the summary counts saved by `test_evaluation_function.py`.
 
 | Flag | Required | Default | Description |
 | --- | --- | --- | --- |
@@ -105,13 +105,14 @@ Digs into one stored run's failures — errors, network errors, feedback warning
 | `--eval_function_name` | No | — | When `--run_id` is omitted, narrows the "most recent run" lookup to this function |
 | `--output` | No | `analysis_<run_id>.json` | Path to write the JSON report |
 | `--top_n` | No | `5` | Max example records kept per category in the JSON report only (the CSV export is always uncapped) |
+| `--analyze_feedback` | No | off | Fetches and analyzes the `feedback_warnings` subcollection — included in the JSON report, console summary, and CSV export only when passed |
 
 ### Output artifacts
 
 Each invocation writes two files plus a console summary:
 
-- **JSON report** at `--output` (or the default path) — categorized breakdowns (by error type, param set, grade-mismatch direction, grader-exception failing side) with up to `--top_n` example records per category.
-- **Full CSV export** — same path with a `.csv` extension, containing every record across all four categories (uncapped), with columns: `category, type, submission_id, param_set, original_grade, answer, response, message`.
+- **JSON report** at `--output` (or the default path) — categorized breakdowns (by error type, param set, grade-mismatch direction, grader-exception failing side) with up to `--top_n` example records per category. The `feedback_warnings_analysis` section is included only when `--analyze_feedback` is passed.
+- **Full CSV export** — same path with a `.csv` extension, containing every record across all four categories (uncapped), with columns: `category, type, submission_id, param_set, original_grade, answer, response, message`. `feedback_warnings` rows are included only when `--analyze_feedback` is passed.
 
 ### Examples
 
@@ -124,6 +125,9 @@ python3 analyze_run.py --eval_function_name my_function
 
 # Analyze a specific run, with more examples per category
 python3 analyze_run.py --run_id abc123 --top_n 20 --output analysis_abc123.json
+
+# Also fetch and include feedback-mismatch analysis
+python3 analyze_run.py --run_id abc123 --analyze_feedback
 ```
 
 ## Usage: `manage_exclusions.py`

@@ -203,11 +203,11 @@ def build_report(
         run_doc: Dict[str, Any],
         errors_cat: Dict[str, Any],
         network_errors_cat: Dict[str, Any],
-        feedback_warnings_cat: Dict[str, Any],
+        feedback_warnings_cat: Optional[Dict[str, Any]],
         parsing_warnings_cat: Dict[str, Any],
         run_id: str,
 ) -> Dict[str, Any]:
-    return {
+    report = {
         "run_id": run_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_params": {
@@ -233,9 +233,11 @@ def build_report(
         "caveat": _CAVEAT_TEXT,
         "errors_analysis": errors_cat,
         "network_errors_analysis": network_errors_cat,
-        "feedback_warnings_analysis": feedback_warnings_cat,
         "parsing_warnings_analysis": parsing_warnings_cat,
     }
+    if feedback_warnings_cat is not None:
+        report["feedback_warnings_analysis"] = feedback_warnings_cat
+    return report
 
 
 def counter_to_bullets(counter: Dict[str, int], indent: str = "  ") -> List[str]:
@@ -359,13 +361,14 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
         print(line)
     print_examples(ne["examples"], top_n, indent="  ")
 
-    fw = report["feedback_warnings_analysis"]
-    print(f"\n=== Feedback Warnings (total: {fw['total']}) ===")
-    for line in counter_to_bullets(fw["by_warning_type"]):
-        print(line)
-    print(f"  non-empty db_feedback: {fw['non_empty_db_feedback_count']}  "
-          f"non-empty api_feedback: {fw['non_empty_api_feedback_count']}")
-    print_examples(fw["examples"], top_n, indent="  ")
+    if "feedback_warnings_analysis" in report:
+        fw = report["feedback_warnings_analysis"]
+        print(f"\n=== Feedback Warnings (total: {fw['total']}) ===")
+        for line in counter_to_bullets(fw["by_warning_type"]):
+            print(line)
+        print(f"  non-empty db_feedback: {fw['non_empty_db_feedback_count']}  "
+              f"non-empty api_feedback: {fw['non_empty_api_feedback_count']}")
+        print_examples(fw["examples"], top_n, indent="  ")
 
     pw = report["parsing_warnings_analysis"]
     print(f"\n=== Parsing Warnings (total: {pw['total']}) ===")
@@ -389,6 +392,9 @@ def main() -> None:
                         help="When --run_id is omitted, only consider the latest run for this eval_function_name.")
     parser.add_argument("--output", default=None, help="Path to write the JSON report (default: analysis_<run_id>.json)")
     parser.add_argument("--top_n", type=int, default=5, help="Max example records kept per category bucket (default: 5)")
+    parser.add_argument("--analyze_feedback", action="store_true",
+                        help="Fetch and analyze the feedback_warnings subcollection "
+                             "(JSON report section, console summary, CSV rows). Omitted by default.")
 
     args = parser.parse_args()
 
@@ -403,12 +409,12 @@ def main() -> None:
         doc_ref = _get_run_doc_ref(db, run_id)
         errors = fetch_subcollection(doc_ref, "errors")
         network_errors = fetch_subcollection(doc_ref, "network_errors")
-        feedback_warnings = fetch_subcollection(doc_ref, "feedback_warnings")
+        feedback_warnings = fetch_subcollection(doc_ref, "feedback_warnings") if args.analyze_feedback else []
         parsing_warnings = fetch_subcollection(doc_ref, "parsing_warnings")
 
         errors_cat = categorize_errors(errors, args.top_n)
         network_errors_cat = summarize_light_subcollection(network_errors, "error_type", args.top_n)
-        feedback_warnings_cat = summarize_feedback_warnings(feedback_warnings, args.top_n)
+        feedback_warnings_cat = summarize_feedback_warnings(feedback_warnings, args.top_n) if args.analyze_feedback else None
         parsing_warnings_cat = summarize_light_subcollection(parsing_warnings, "warning_type", args.top_n)
 
         report = build_report(
