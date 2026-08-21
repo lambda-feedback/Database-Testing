@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: ''
+      api_mode:
+        description: 'API contract to test against: legacy or mued.'
+        required: false
+        type: string
+        default: 'legacy'
     secrets:
       TEST_API_ENDPOINT:
         description: 'API Endpoint URL to test'
@@ -95,6 +100,11 @@ on:
         required: false
         type: string
         default: '100'
+      api_mode:
+        description: 'API contract to test against: legacy or mued.'
+        required: false
+        type: string
+        default: 'legacy'
 
 jobs:
   run_test:
@@ -108,6 +118,7 @@ jobs:
           ref: main
           token: ${{ github.token }}
           path: Database-Testing
+          submodules: true
 
       - name: Set up Python Environment
         uses: actions/setup-python@v5
@@ -119,6 +130,20 @@ jobs:
         run: |
           set -euo pipefail
           pip install -r requirements.txt
+
+      - name: Set up Node.js for muEd schema bundling
+        if: inputs.api_mode == 'mued'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Bundle muEd OpenAPI schema
+        if: inputs.api_mode == 'mued'
+        working-directory: ./Database-Testing/vendor/mued-api
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run bundle
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v1
@@ -165,6 +190,7 @@ jobs:
             --grade_params_json "" \
             --request_delay "${{ inputs.request_delay }}" \
             --max_concurrency "${{ inputs.max_concurrency }}" \
+            --api_mode "${{ inputs.api_mode }}" \
             $SEED_ARG; then
             echo "::error::Python script failed with non-zero exit code"
             exit 1

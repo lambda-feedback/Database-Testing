@@ -11,6 +11,11 @@ DEFAULT_SQL_LIMIT = 100
 MAX_ERROR_THRESHOLD = 50
 REPORT_FILENAME = 'report_data.json'
 
+DEFAULT_MUED_SCHEMA_PATH = os.environ.get(
+    'MUED_SCHEMA_PATH',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor', 'mued-api', 'dist', 'openapi.yml')
+)
+
 logger = logging.getLogger()
 try:
     logger.setLevel(LOG_LEVEL)

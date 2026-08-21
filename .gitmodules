@@ -1,0 +1,4 @@
+[submodule "vendor/mued-api"]
+	path = vendor/mued-api
+	url = https://github.com/mued-api/spec.git
+	branch = main

@@ -72,6 +72,7 @@ def save_test_results_to_firestore(
             'request_delay': test_params.get('request_delay'),
             'max_concurrency': test_params.get('max_concurrency'),
             'grade_params_json': test_params.get('grade_params_json', ''),
+            'api_mode': test_params.get('api_mode', 'legacy'),
             'seed': test_params.get('seed'),
             'pass_count': results_summary['pass_count'],
             'total_count': results_summary['total_count'],

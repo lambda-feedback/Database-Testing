@@ -2,6 +2,24 @@
 
 Test evaluation functions against previous student submissions.
 
+## muEd mode
+
+`--api_mode mued` tests the [muEd](https://mued.org) `EvaluateRequest`/`Feedback[]` contract instead of the legacy Lambda-Feedback one. Payloads are validated against the live [`mued-api/spec`](https://github.com/mued-api/spec) OpenAPI schema, vendored here as a git submodule at `vendor/mued-api`, so schema drift fails loudly instead of silently.
+
+One-time local setup (CI does this automatically):
+
+```
+git submodule update --init
+cd vendor/mued-api && npm ci && npm run bundle
+```
+
+Re-run the bundle step whenever the submodule pointer is bumped. To pull in schema updates:
+
+```
+cd vendor/mued-api && git checkout main && git pull
+cd ../.. && git add vendor/mued-api && git commit -m "Bump mued-api/spec submodule"
+```
+
 This toolkit pulls historical student submissions out of the production Postgres database, replays each one against a live evaluation-function HTTP endpoint, and compares the endpoint's response to the originally recorded grade. Results (pass/fail counts plus every error and warning) are persisted to Firestore, with a local `report_data.json` fallback if Firestore is unavailable. It's used both to catch regressions before deploying an evaluation function and to test a new/refactored function against an old function's historical data ("cross-function" testing).
 
 It ships as three CLI scripts:

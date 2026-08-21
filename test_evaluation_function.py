@@ -10,6 +10,7 @@ from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, DEFAU
 from db import get_db_connection, fetch_data
 from evaluator import test_endpoint
 from firestore_client import get_firestore_client, save_test_results_to_firestore, fetch_excluded_submission_ids
+from mued_schema import get_schema as get_mued_schema, SchemaLoadError
 
 
 def _parse_exclude_grade_param_args(pairs: List[str]) -> Dict[str, List[str]]:
@@ -80,6 +81,8 @@ def start_test(event, context):
         eval_function_params = payload.get('eval_function_params') or {}
         request_delay = float(payload.get('request_delay', DEFAULT_REQUEST_DELAY))
         max_concurrency = int(payload.get('max_concurrency', DEFAULT_MAX_CONCURRENCY))
+        api_mode = payload.get('api_mode', 'legacy')
+        mued_schema_path = payload.get('mued_schema_path')
         max_error_threshold = _parse_max_error_threshold(payload.get('max_error_threshold', MAX_ERROR_THRESHOLD))
         seed = payload.get('seed')
         if seed is None:
@@ -98,6 +101,16 @@ def start_test(event, context):
             logger.error(error_msg)
             sys.exit(1)
 
+        if api_mode == 'mued':
+            try:
+                get_mued_schema(mued_schema_path) if mued_schema_path else get_mued_schema()
+            except SchemaLoadError as e:
+                error_msg = str(e)
+                with open(REPORT_FILENAME, 'w') as f:
+                    json.dump({"status": "failed", "error": error_msg}, f)
+                logger.error(error_msg)
+                sys.exit(1)
+
         test_params = {
             'endpoint': endpoint_to_test,
             'eval_function_name': eval_function_name,
@@ -106,6 +119,8 @@ def start_test(event, context):
             'grade_params_json': grade_params_json,
             'request_delay': request_delay,
             'max_concurrency': max_concurrency,
+            'api_mode': api_mode,
+            'mued_schema_path': mued_schema_path,
             'max_error_threshold': max_error_threshold,
             'seed': seed,
             'eval_function_params': eval_function_params,
@@ -124,7 +139,10 @@ def start_test(event, context):
         data_for_test = fetch_data(conn, sql_limit, source_eval_function_name, grade_params_json, seed, excluded_ids, exclude_grade_params)
         conn.close()
         conn = None
-        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency, max_error_threshold, eval_function_params))
+        results = asyncio.run(test_endpoint(endpoint_to_test, data_for_test, request_delay, max_concurrency,
+                                             mode=api_mode, mued_schema_path=mued_schema_path,
+                                             max_error_threshold=max_error_threshold,
+                                             eval_function_params=eval_function_params))
 
         results_summary = {
             "status": "success",
@@ -226,6 +244,12 @@ if __name__ == "__main__":
                              f"(default: {MAX_ERROR_THRESHOLD})")
     parser.add_argument("--seed", type=float, default=None,
                         help="Random seed for reproducible sampling (float in [-1.0, 1.0]). Auto-generated if omitted.")
+    parser.add_argument("--api_mode", choices=["legacy", "mued"], default="legacy",
+                        help="API contract to test against: legacy Lambda-Feedback 'result.is_correct' "
+                             "or muEd 'Feedback[]'/awardedPoints (default: legacy)")
+    parser.add_argument("--mued_schema_path", default=None,
+                        help="Path to the bundled muEd openapi.yml. Defaults to the MUED_SCHEMA_PATH "
+                             "env var / mued_schema.DEFAULT_MUED_SCHEMA_PATH. Only used when --api_mode mued.")
 
     args = parser.parse_args()
 
@@ -241,6 +265,8 @@ if __name__ == "__main__":
         "max_concurrency": args.max_concurrency,
         "max_error_threshold": args.max_error_threshold,
         "seed": args.seed,
+        "api_mode": args.api_mode,
+        "mued_schema_path": args.mued_schema_path,
     }
 
     print("-" * 50)

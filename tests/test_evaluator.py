@@ -7,32 +7,32 @@ import evaluator as ev
 
 
 # ---------------------------------------------------------------------------
-# _prepare_payload (pure)
+# _prepare_legacy_payload (pure)
 # ---------------------------------------------------------------------------
 
 def test_prepare_payload_strips_quotes_from_answer():
     record = {"answer": '"2.5"', "submission": "2.5"}
-    payload = ev._prepare_payload(record)
+    payload = ev._prepare_legacy_payload(record)
     assert payload["answer"] == "2.5"
 
 
 def test_prepare_payload_merges_grade_params_and_eval_function_params():
     record = {"answer": "2", "submission": "2", "grade_params": {"comparison": "exact"}}
-    payload = ev._prepare_payload(record, eval_function_params={"comparison": "approx", "extra": True})
+    payload = ev._prepare_legacy_payload(record, eval_function_params={"comparison": "approx", "extra": True})
     assert payload["params"]["comparison"] == "approx"
     assert payload["params"]["extra"] is True
 
 
 def test_prepare_payload_defaults_cases_and_symbols_when_absent():
     record = {"answer": "2", "submission": "2"}
-    payload = ev._prepare_payload(record)
+    payload = ev._prepare_legacy_payload(record)
     assert payload["params"]["cases"] == []
     assert payload["params"]["symbols"] == {}
 
 
 def test_prepare_payload_fills_missing_case_params_with_empty_dict():
     record = {"answer": "2", "submission": "2", "cases": [{"answer": "1"}, {"answer": "2", "params": {"x": 1}}]}
-    payload = ev._prepare_payload(record)
+    payload = ev._prepare_legacy_payload(record)
     assert payload["params"]["cases"][0]["params"] == {}
     assert payload["params"]["cases"][1]["params"] == {"x": 1}
 

@@ -4,12 +4,14 @@ import math
 from typing import Dict, Any, List, Optional, Tuple, Union
 
 import aiohttp
+from jsonschema.exceptions import ValidationError
 
 from config import logger, DEFAULT_REQUEST_DELAY, DEFAULT_MAX_CONCURRENCY, MAX_ERROR_THRESHOLD, MAX_RETRY_ATTEMPTS
+from mued_schema import MuEdSchema, SchemaLoadError, REQUIRED_ARTEFACT_TYPE, get_schema as get_mued_schema
 
 
-def _prepare_payload(record: Dict[str, Any], eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Constructs the JSON payload for the API request from the DB record."""
+def _prepare_legacy_payload(record: Dict[str, Any], eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Constructs the legacy Lambda-Feedback JSON payload for the API request from the DB record."""
     grade_params = record.get('grade_params') or {}
     response = record.get('submission')
     answer = record.get('answer').replace('"', '')
@@ -34,6 +36,41 @@ def _prepare_payload(record: Dict[str, Any], eval_function_params: Optional[Dict
             "cases": cases,
         }
     }
+
+
+def _prepare_mued_payload(record: Dict[str, Any], schema: MuEdSchema) -> Dict[str, Any]:
+    """Constructs a muEd EvaluateRequest JSON payload from the DB record, validated against the
+    live muEd OpenAPI schema before being returned."""
+    response = record.get('submission')
+
+    payload: Dict[str, Any] = {
+        "submission": {
+            "type": REQUIRED_ARTEFACT_TYPE,
+            "content": {"value": response},
+        },
+    }
+
+    answer = record.get('answer')
+    if answer is not None:
+        if isinstance(answer, str):
+            answer = answer.replace('"', '')
+        payload["task"] = {
+            "title": "Evaluation Task",
+            "referenceSolution": {"value": answer},
+        }
+
+    grade_params = record.get('grade_params') or {}
+    cases = [
+        {**case, "params": case["params"] if case.get("params") is not None else {}}
+        for case in record.get('cases', []) or []
+    ]
+    symbols = record.get('symbols') or {}
+    config_params = {**grade_params, "symbols": symbols, "cases": cases}
+    if config_params:
+        payload["configuration"] = {"params": config_params}
+
+    schema.validate_evaluate_request(payload)
+    return payload
 
 
 async def _execute_request(session: aiohttp.ClientSession, endpoint_path: str, payload: Dict[str, Any], retry_base_delay: float = 0.0) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -123,6 +160,52 @@ def _validate_response(response_data: Dict[str, Any], db_grade: Any) -> Optional
     }
 
 
+def _validate_mued_response(response_data: Any, db_grade: Any) -> Optional[Dict[str, Any]]:
+    """Compares a muEd Feedback[] response's awardedPoints against the historical database grade.
+    awardedPoints == 1 is treated as correct, == 0 as incorrect; anything else is a reported mismatch."""
+    if not isinstance(response_data, list):
+        return {
+            "error_type": "Malformed muEd Response",
+            "message": f"Expected a JSON array of Feedback items, got {type(response_data).__name__}.",
+            "original_grade": db_grade,
+        }
+
+    if not response_data:
+        return {
+            "error_type": "Empty muEd Response",
+            "message": "API returned an empty Feedback[] array; cannot determine awardedPoints.",
+            "original_grade": db_grade,
+        }
+
+    awarded_points = response_data[0].get('awardedPoints')
+
+    expected_is_correct: Optional[bool]
+    if isinstance(db_grade, int):
+        expected_is_correct = bool(db_grade)
+    elif db_grade is None:
+        expected_is_correct = None
+    else:
+        expected_is_correct = db_grade
+
+    if awarded_points not in (0, 1):
+        return {
+            "error_type": "Unexpected awardedPoints",
+            "message": f"awardedPoints={awarded_points!r}; expected 0 or 1 for pass/fail mapping.",
+            "original_grade": db_grade,
+        }
+
+    api_is_correct = bool(awarded_points)
+
+    if api_is_correct == expected_is_correct:
+        return None
+
+    return {
+        "error_type": "**Grade Mismatch**",
+        "message": f"muEd awardedPoints={awarded_points} (-> {api_is_correct}) does not match DB grade '{expected_is_correct}'.",
+        "original_grade": db_grade,
+    }
+
+
 def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional[Dict[str, Any]]:
     """Checks if API feedback matches the stored DB feedback. Returns a warning dict or None."""
     result = response_data.get('result', {})
@@ -144,6 +227,8 @@ def _check_feedback(response_data: Dict[str, Any], db_feedback: Any) -> Optional
 async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         request_delay: float = DEFAULT_REQUEST_DELAY,
                         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+                        mode: str = "legacy",
+                        mued_schema_path: Optional[str] = None,
                         max_error_threshold: Union[int, float] = MAX_ERROR_THRESHOLD,
                         eval_function_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Tests the endpoint against all records concurrently, returns aggregated results.
@@ -162,6 +247,18 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     network_error_count = 0
     completed_count = 0
 
+    if mode == "mued":
+        schema = get_mued_schema(mued_schema_path) if mued_schema_path else get_mued_schema()
+        request_path = base_endpoint.rstrip('/') + '/evaluate'
+        prepare_fn = lambda record: _prepare_mued_payload(record, schema)
+        validate_fn = _validate_mued_response
+        check_feedback_fn = None
+    else:
+        request_path = base_endpoint
+        prepare_fn = lambda record: _prepare_legacy_payload(record, eval_function_params)
+        validate_fn = _validate_response
+        check_feedback_fn = _check_feedback
+
     if isinstance(max_error_threshold, float):
         if not 0.0 <= max_error_threshold <= 1.0:
             raise ValueError(f"max_error_threshold as a float must be between 0.0 and 1.0 (got {max_error_threshold})")
@@ -174,7 +271,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
     lock = asyncio.Lock()
     stop_event = asyncio.Event()
 
-    logger.info(f"Starting tests on endpoint with max_concurrency={max_concurrency}, request_delay={request_delay}s")
+    logger.info(f"Starting tests on endpoint with mode={mode}, max_concurrency={max_concurrency}, request_delay={request_delay}s")
 
     async def worker(i: int, record: Dict[str, Any]) -> None:
         nonlocal validation_error_count, network_error_count, completed_count, successful_requests
@@ -187,9 +284,25 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 return
 
             submission_id = str(record.get('submission_id')) if record.get('submission_id') is not None else None
-            payload = _prepare_payload(record, eval_function_params)
 
-            response_data, execution_error = await _execute_request(session, base_endpoint, payload, retry_base_delay=request_delay)
+            try:
+                payload = prepare_fn(record)
+            except (SchemaLoadError, ValidationError) as e:
+                async with lock:
+                    validation_error_count += 1
+                    errors.append({
+                        "error_type": "Schema Validation Error",
+                        "message": str(e),
+                        "original_grade": record.get('grade'),
+                        "submission_id": submission_id,
+                    })
+                    if validation_error_count >= MAX_ERROR_THRESHOLD:
+                        logger.warning(f"Stopping early! Reached maximum error threshold of {MAX_ERROR_THRESHOLD}.")
+                        stop_event.set()
+                    completed_count += 1
+                return
+
+            response_data, execution_error = await _execute_request(session, request_path, payload, retry_base_delay=request_delay)
             logging.debug(f"[{submission_id}] grade={record.get('grade')} | REQUEST: {payload} | RESPONSE: {response_data or execution_error}")
 
             async with lock:
@@ -207,7 +320,7 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                         logger.info(f"Progress: {completed_count}/{total_records} requests completed")
                     return
 
-                validation_error = _validate_response(response_data, record.get('grade'))
+                validation_error = validate_fn(response_data, record.get('grade'))
 
                 if validation_error:
                     if (record.get('historical_error_message') is not None
@@ -233,11 +346,12 @@ async def test_endpoint(base_endpoint: str, data_records: List[Dict[str, Any]],
                 else:
                     successful_requests += 1
 
-                feedback_warning = _check_feedback(response_data, record.get('feedback'))
-                if feedback_warning:
-                    feedback_warning['submission_id'] = submission_id
-                    feedback_warning['request_payload'] = payload
-                    feedback_warnings.append(feedback_warning)
+                if check_feedback_fn:
+                    feedback_warning = check_feedback_fn(response_data, record.get('feedback'))
+                    if feedback_warning:
+                        feedback_warning['submission_id'] = submission_id
+                        feedback_warning['request_payload'] = payload
+                        feedback_warnings.append(feedback_warning)
 
                 completed_count += 1
                 if completed_count % 10 == 0:
