@@ -47,6 +47,36 @@ def test_safe_get_params_non_dict_returns_empty_dict():
 
 
 # ---------------------------------------------------------------------------
+# extract_answer_response
+# ---------------------------------------------------------------------------
+
+def test_extract_answer_response_legacy_shape():
+    item = {"request_payload": {"answer": "2", "response": "3"}}
+    answer, response = ar.extract_answer_response(item, api_mode="legacy")
+    assert answer == "2"
+    assert response == "3"
+
+
+def test_extract_answer_response_mued_shape():
+    item = {
+        "request_payload": {
+            "task": {"referenceSolution": {"value": "2"}},
+            "submission": {"content": {"value": "3"}},
+        }
+    }
+    answer, response = ar.extract_answer_response(item, api_mode="mued")
+    assert answer == "2"
+    assert response == "3"
+
+
+def test_extract_answer_response_mued_shape_missing_task_returns_none():
+    item = {"request_payload": {"submission": {"content": {"value": "3"}}}}
+    answer, response = ar.extract_answer_response(item, api_mode="mued")
+    assert answer is None
+    assert response == "3"
+
+
+# ---------------------------------------------------------------------------
 # build_param_set_key
 # ---------------------------------------------------------------------------
 
@@ -167,7 +197,23 @@ def test_categorize_grader_exception_buckets_by_failing_side():
             "request_payload": {"response": "3.14", "answer": "2"},
         },
     ]
-    result = ar.categorize_grader_exception(items, top_n=5)
+    result = ar.categorize_grader_exception(items, top_n=5, api_mode="legacy")
+    assert result["total"] == 1
+    assert result["by_failing_side"] == {"response": 1}
+
+
+def test_categorize_grader_exception_buckets_by_failing_side_mued_mode():
+    items = [
+        {
+            "error_type": "Grader Exception",
+            "detail": "could not parse `3.14`",
+            "request_payload": {
+                "submission": {"content": {"value": "3.14"}},
+                "task": {"referenceSolution": {"value": "2"}},
+            },
+        },
+    ]
+    result = ar.categorize_grader_exception(items, top_n=5, api_mode="mued")
     assert result["total"] == 1
     assert result["by_failing_side"] == {"response": 1}
 
@@ -193,7 +239,7 @@ def test_categorize_errors_aggregates_subcategories():
         {"error_type": "Grader Exception", "detail": "`x`", "request_payload": {"params": {}, "response": "x", "answer": "y"}},
         {"error_type": "Missing API Field", "request_payload": {"params": {}}},
     ]
-    result = ar.categorize_errors(items, top_n=5)
+    result = ar.categorize_errors(items, top_n=5, api_mode="legacy")
     assert result["total"] == 3
     assert result["by_error_type"] == {
         "**Grade Mismatch**": 1,
@@ -266,6 +312,20 @@ def test_build_report_omits_feedback_warnings_section_when_none():
     assert "feedback_warnings_analysis" not in report
     assert report["run_id"] == "run1"
     assert report["errors_analysis"] == {"total": 0}
+    assert report["run_params"]["api_mode"] == "legacy"
+
+
+def test_build_report_defaults_api_mode_to_legacy_when_absent():
+    run_doc = _sample_run_doc()
+    assert "api_mode" not in run_doc
+    report = ar.build_report(run_doc, {"total": 0}, {"total": 0}, None, {"total": 0}, run_id="run1")
+    assert report["run_params"]["api_mode"] == "legacy"
+
+
+def test_build_report_surfaces_stored_api_mode():
+    run_doc = {**_sample_run_doc(), "api_mode": "mued"}
+    report = ar.build_report(run_doc, {"total": 0}, {"total": 0}, None, {"total": 0}, run_id="run1")
+    assert report["run_params"]["api_mode"] == "mued"
 
 
 def test_build_report_includes_feedback_warnings_section_when_present():
@@ -287,6 +347,20 @@ def test_counter_to_bullets_sorts_by_count_desc_then_key_asc():
 def test_format_record_line_includes_submission_and_values():
     item = {"submission_id": "s1", "request_payload": {"answer": "2", "response": "3"}}
     line = ar.format_record_line(item, indent="")
+    assert "[s1]" in line
+    assert "answer='2'" in line
+    assert "response='3'" in line
+
+
+def test_format_record_line_mued_mode_reads_nested_values():
+    item = {
+        "submission_id": "s1",
+        "request_payload": {
+            "task": {"referenceSolution": {"value": "2"}},
+            "submission": {"content": {"value": "3"}},
+        },
+    }
+    line = ar.format_record_line(item, indent="", api_mode="mued")
     assert "[s1]" in line
     assert "answer='2'" in line
     assert "response='3'" in line
@@ -316,12 +390,29 @@ def test_flatten_records_produces_one_row_per_record():
     feedback_warnings = [{"warning_type": "Mismatch", "submission_id": "s3", "request_payload": {"params": {}}}]
     parsing_warnings = [{"warning_type": "Malformed", "submission_id": "s4", "request_payload": {"params": {}}}]
 
-    rows = ar.flatten_records(errors, network_errors, feedback_warnings, parsing_warnings)
+    rows = ar.flatten_records(errors, network_errors, feedback_warnings, parsing_warnings, api_mode="legacy")
 
     assert [r["category"] for r in rows] == ["errors", "network_errors", "feedback_warnings", "parsing_warnings"]
     assert rows[0]["type"] == "**Grade Mismatch**"
     assert rows[0]["submission_id"] == "s1"
     assert rows[2]["type"] == "Mismatch"
+
+
+def test_flatten_records_mued_mode_populates_answer_response():
+    errors = [{
+        "error_type": "**Grade Mismatch**",
+        "submission_id": "s1",
+        "request_payload": {
+            "params": {},
+            "task": {"referenceSolution": {"value": "2"}},
+            "submission": {"content": {"value": "3"}},
+        },
+    }]
+
+    rows = ar.flatten_records(errors, [], [], [], api_mode="mued")
+
+    assert rows[0]["answer"] == "2"
+    assert rows[0]["response"] == "3"
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +548,7 @@ def test_print_console_summary_prints_key_sections(capsys):
     network_errors = [{"error_type": "Timeout"}]
     parsing_warnings = [{"warning_type": "Malformed"}]
 
-    errors_cat = ar.categorize_errors(errors, top_n=5)
+    errors_cat = ar.categorize_errors(errors, top_n=5, api_mode="legacy")
     network_errors_cat = ar.summarize_light_subcollection(network_errors, "error_type", top_n=5)
     parsing_warnings_cat = ar.summarize_light_subcollection(parsing_warnings, "warning_type", top_n=5)
 
@@ -539,3 +630,51 @@ def test_main_writes_json_and_csv_reports(tmp_path, monkeypatch):
         rows = list(csv.DictReader(f))
     assert len(rows) == 3
     assert {row["category"] for row in rows} == {"errors", "network_errors", "parsing_warnings"}
+
+
+def test_main_mued_mode_populates_answer_response_in_csv(tmp_path, monkeypatch):
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["analyze_run.py"])
+
+    run_doc_snapshot = MagicMock()
+    run_doc_snapshot.id = "run456"
+    run_doc_snapshot.to_dict.return_value = {**_sample_run_doc(), "api_mode": "mued"}
+
+    error_doc = MagicMock()
+    error_doc.to_dict.return_value = {
+        "error_type": "**Grade Mismatch**",
+        "submission_id": "s1",
+        "original_grade": True,
+        "request_payload": {
+            "params": {"comparison": "exact"},
+            "task": {"referenceSolution": {"value": "2"}},
+            "submission": {"content": {"value": "3"}},
+        },
+    }
+
+    subcollections = {"errors": [error_doc]}
+
+    def collection_side_effect(name):
+        mock = MagicMock()
+        mock.stream.return_value = subcollections.get(name, [])
+        return mock
+
+    doc_ref = MagicMock()
+    doc_ref.collection.side_effect = collection_side_effect
+
+    db = MagicMock()
+    db.collection.return_value.order_by.return_value.limit.return_value.stream.return_value = [run_doc_snapshot]
+    db.collection.return_value.document.return_value = doc_ref
+
+    monkeypatch.setattr(ar, "get_firestore_client", lambda: (db, "my-project"))
+
+    ar.main()
+
+    csv_path = tmp_path / "analysis_run456.csv"
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 1
+    assert rows[0]["answer"] == "2"
+    assert rows[0]["response"] == "3"

@@ -71,6 +71,19 @@ def safe_get_params(item: Dict[str, Any]) -> Dict[str, Any]:
     return params if isinstance(params, dict) else {}
 
 
+def extract_answer_response(item: Dict[str, Any], api_mode: str) -> tuple:
+    """Extracts answer/response from request_payload according to the run's api_mode:
+    'legacy' uses the flat top-level keys; 'mued' uses the nested EvaluateRequest shape
+    (task.referenceSolution.value / submission.content.value)."""
+    if api_mode == "mued":
+        answer = safe_get(item, "request_payload", "task", "referenceSolution", "value")
+        response = safe_get(item, "request_payload", "submission", "content", "value")
+    else:
+        answer = safe_get(item, "request_payload", "answer")
+        response = safe_get(item, "request_payload", "response")
+    return answer, response
+
+
 def build_param_set_key(params: Dict[str, Any]) -> str:
     """Groups records by the full set of grading params present, whatever they are,
     since not every eval function shares a common param like `comparison`. `symbols`
@@ -138,13 +151,12 @@ def categorize_grade_mismatch(items: List[Dict[str, Any]], top_n: int) -> Dict[s
     }
 
 
-def categorize_grader_exception(items: List[Dict[str, Any]], top_n: int) -> Dict[str, Any]:
+def categorize_grader_exception(items: List[Dict[str, Any]], top_n: int, api_mode: str) -> Dict[str, Any]:
     exceptions = [i for i in items if i.get("error_type") == "Grader Exception"]
 
     by_failing_side: Counter = Counter()
     for item in exceptions:
-        response = safe_get(item, "request_payload", "response")
-        answer = safe_get(item, "request_payload", "answer")
+        answer, response = extract_answer_response(item, api_mode)
         side = classify_exception_side(item.get("detail", ""), response, answer)
         by_failing_side[side] += 1
 
@@ -160,7 +172,7 @@ def categorize_missing_api_field(items: List[Dict[str, Any]], top_n: int) -> Dic
     return {"total": len(missing), "examples": missing[:top_n]}
 
 
-def categorize_errors(items: List[Dict[str, Any]], top_n: int) -> Dict[str, Any]:
+def categorize_errors(items: List[Dict[str, Any]], top_n: int, api_mode: str) -> Dict[str, Any]:
     by_error_type = Counter(item.get("error_type", "(unknown)") for item in items)
     by_param_set = Counter(build_param_set_key(safe_get_params(item)) for item in items)
     return {
@@ -168,7 +180,7 @@ def categorize_errors(items: List[Dict[str, Any]], top_n: int) -> Dict[str, Any]
         "by_error_type": dict(by_error_type),
         "by_param_set": dict(by_param_set),
         "grade_mismatch": categorize_grade_mismatch(items, top_n),
-        "grader_exception": categorize_grader_exception(items, top_n),
+        "grader_exception": categorize_grader_exception(items, top_n, api_mode),
         "missing_api_field": categorize_missing_api_field(items, top_n),
     }
 
@@ -217,6 +229,7 @@ def build_report(
             "request_delay": run_doc.get("request_delay"),
             "max_concurrency": run_doc.get("max_concurrency"),
             "grade_params_json": run_doc.get("grade_params_json"),
+            "api_mode": run_doc.get("api_mode", "legacy"),
             "seed": run_doc.get("seed"),
             "status": run_doc.get("status"),
             "timestamp": run_doc.get("timestamp"),
@@ -245,19 +258,18 @@ def counter_to_bullets(counter: Dict[str, int], indent: str = "  ") -> List[str]
     return [f"{indent}{key}: {count}" for key, count in items]
 
 
-def format_record_line(item: Dict[str, Any], indent: str = "    ") -> str:
+def format_record_line(item: Dict[str, Any], indent: str = "    ", api_mode: str = "legacy") -> str:
     submission_id = item.get("submission_id", "(unknown)")
-    answer = safe_get(item, "request_payload", "answer")
-    response = safe_get(item, "request_payload", "response")
+    answer, response = extract_answer_response(item, api_mode)
     return f"{indent}[{submission_id}] answer={answer!r}  response={response!r}"
 
 
-def print_examples(examples: List[Dict[str, Any]], top_n: int, indent: str = "  ") -> None:
+def print_examples(examples: List[Dict[str, Any]], top_n: int, indent: str = "  ", api_mode: str = "legacy") -> None:
     if not examples:
         return
     print(f"{indent}Examples (showing up to {top_n}):")
     for item in examples:
-        print(format_record_line(item, indent=indent + "  "))
+        print(format_record_line(item, indent=indent + "  ", api_mode=api_mode))
 
 
 def flatten_records(
@@ -265,6 +277,7 @@ def flatten_records(
         network_errors: List[Dict[str, Any]],
         feedback_warnings: List[Dict[str, Any]],
         parsing_warnings: List[Dict[str, Any]],
+        api_mode: str,
 ) -> List[Dict[str, Any]]:
     """Flattens every record across all four subcollections into one row per record,
     for a full untruncated CSV export (the JSON report's examples are capped at top_n)."""
@@ -273,14 +286,15 @@ def flatten_records(
     def add(items: List[Dict[str, Any]], category: str) -> None:
         for item in items:
             params = safe_get_params(item)
+            answer, response = extract_answer_response(item, api_mode)
             rows.append({
                 "category": category,
                 "type": item.get("error_type") or item.get("warning_type") or "(unknown)",
                 "submission_id": item.get("submission_id"),
                 "param_set": build_param_set_key(params),
                 "original_grade": item.get("original_grade"),
-                "answer": safe_get(item, "request_payload", "answer"),
-                "response": safe_get(item, "request_payload", "response"),
+                "answer": answer,
+                "response": response,
                 "message": item.get("message"),
             })
 
@@ -309,6 +323,7 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
     print("-" * 60)
 
     rp = report["run_params"]
+    api_mode = rp.get("api_mode", "legacy")
     print(f"Function: {rp['eval_function_name']}")
     if rp["source_eval_function_name"] and rp["source_eval_function_name"] != rp["eval_function_name"]:
         print(f"Source data: {rp['source_eval_function_name']}")
@@ -342,24 +357,24 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
     print("  By param set + direction:")
     for line in counter_to_bullets(gm["by_param_set_and_direction"], indent="    "):
         print(line)
-    print_examples(gm["examples"], top_n, indent="  ")
+    print_examples(gm["examples"], top_n, indent="  ", api_mode=api_mode)
 
     ge = ea["grader_exception"]
     print(f"\nGrader Exception (total: {ge['total']}):")
     print("  By failing side:")
     for line in counter_to_bullets(ge["by_failing_side"], indent="    "):
         print(line)
-    print_examples(ge["examples"], top_n, indent="  ")
+    print_examples(ge["examples"], top_n, indent="  ", api_mode=api_mode)
 
     maf = ea["missing_api_field"]
     print(f"\nMissing API Field (total: {maf['total']})")
-    print_examples(maf["examples"], top_n, indent="  ")
+    print_examples(maf["examples"], top_n, indent="  ", api_mode=api_mode)
 
     ne = report["network_errors_analysis"]
     print(f"\n=== Network Errors (total: {ne['total']}) ===")
     for line in counter_to_bullets(ne.get("by_error_type", {})):
         print(line)
-    print_examples(ne["examples"], top_n, indent="  ")
+    print_examples(ne["examples"], top_n, indent="  ", api_mode=api_mode)
 
     if "feedback_warnings_analysis" in report:
         fw = report["feedback_warnings_analysis"]
@@ -368,13 +383,13 @@ def print_console_summary(report: Dict[str, Any], project_id: str, top_n: int) -
             print(line)
         print(f"  non-empty db_feedback: {fw['non_empty_db_feedback_count']}  "
               f"non-empty api_feedback: {fw['non_empty_api_feedback_count']}")
-        print_examples(fw["examples"], top_n, indent="  ")
+        print_examples(fw["examples"], top_n, indent="  ", api_mode=api_mode)
 
     pw = report["parsing_warnings_analysis"]
     print(f"\n=== Parsing Warnings (total: {pw['total']}) ===")
     for line in counter_to_bullets(pw.get("by_warning_type", {})):
         print(line)
-    print_examples(pw["examples"], top_n, indent="  ")
+    print_examples(pw["examples"], top_n, indent="  ", api_mode=api_mode)
 
 
 def main() -> None:
@@ -404,6 +419,7 @@ def main() -> None:
     else:
         run_doc = fetch_latest_run(db, args.eval_function_name)
     run_id = run_doc["run_id"]
+    api_mode = run_doc.get("api_mode", "legacy")
 
     try:
         doc_ref = _get_run_doc_ref(db, run_id)
@@ -412,7 +428,7 @@ def main() -> None:
         feedback_warnings = fetch_subcollection(doc_ref, "feedback_warnings") if args.analyze_feedback else []
         parsing_warnings = fetch_subcollection(doc_ref, "parsing_warnings")
 
-        errors_cat = categorize_errors(errors, args.top_n)
+        errors_cat = categorize_errors(errors, args.top_n, api_mode)
         network_errors_cat = summarize_light_subcollection(network_errors, "error_type", args.top_n)
         feedback_warnings_cat = summarize_feedback_warnings(feedback_warnings, args.top_n) if args.analyze_feedback else None
         parsing_warnings_cat = summarize_light_subcollection(parsing_warnings, "warning_type", args.top_n)
@@ -427,7 +443,7 @@ def main() -> None:
             json.dump(report, f, indent=2, default=_json_default)
 
         csv_output_path = re.sub(r"\.json$", "", output_path, flags=re.IGNORECASE) + ".csv"
-        csv_rows = flatten_records(errors, network_errors, feedback_warnings, parsing_warnings)
+        csv_rows = flatten_records(errors, network_errors, feedback_warnings, parsing_warnings, api_mode)
         write_csv_report(csv_rows, csv_output_path)
 
         print_console_summary(report, project_id, args.top_n)
