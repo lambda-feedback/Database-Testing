@@ -67,6 +67,7 @@ def save_test_results_to_firestore(
             'timestamp': firestore.SERVER_TIMESTAMP,
             'created_at': datetime.utcnow().isoformat(),
             'eval_function_name': test_params.get('eval_function_name'),
+            'source_eval_function_name': test_params.get('source_eval_function_name'),
             'sql_limit': test_params.get('sql_limit'),
             'request_delay': test_params.get('request_delay'),
             'max_concurrency': test_params.get('max_concurrency'),
